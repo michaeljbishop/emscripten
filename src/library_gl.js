@@ -2763,7 +2763,10 @@ var LibraryGL = {
   glRenderbufferStorageOES : 'glRenderbufferStorage',
   glCheckFramebufferStatusOES : 'glCheckFramebufferStatus',
   glDeleteFramebuffersOES : 'glDeleteFramebuffers',
-  glDeleteRenderbuffersOES : 'glDeleteRenderbuffers'
+  glDeleteRenderbuffersOES : 'glDeleteRenderbuffers',
+  glGenVertexArraysOES : 'glGenVertexArrays',
+  glDeleteVertexArraysOES : 'glDeleteVertexArrays',
+  glBindVertexArrayOES : 'glBindVertexArray'
 
 };
 
