@@ -1460,7 +1460,6 @@ var LibrarySDL = {
     var info = SDL.audios[id];
     if (info && info.audio)
     {
-      console.log("paused " + id);
       info.audio.pause();
     }
   },
@@ -1495,7 +1494,6 @@ var LibrarySDL = {
     var info = SDL.audios[id];
     if (info && info.audio)
     {
-      console.log("resumed " + id);
       info.audio.play();
     }
   },
