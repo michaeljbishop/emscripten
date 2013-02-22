@@ -322,7 +322,6 @@ var LibraryGL = {
 
   glGetBooleanv: function(name_, p) {
     var result = GL.getAttribute(name_);
-
     switch (typeof(result)) {
       case "number":
         {{{ makeSetValue('p', '0', 'result != 0', 'i8') }}};
