@@ -2491,6 +2491,17 @@ LibraryManager.library = {
         continue;
       }
 
+      // TODO: Support strings like "%5c" etc.
+      if (format[formatIndex] === '%' && format[formatIndex+1] == 'c') {
+        var argPtr = {{{ makeGetValue('varargs', 'argIndex', 'void*') }}};
+        argIndex += Runtime.getNativeFieldSize('void*');
+        fields++;
+        next = get();
+        {{{ makeSetValue('argPtr', 0, 'next', 'i8') }}}
+        formatIndex += 2;
+        continue;
+      }
+
       // remove whitespace
       while (1) {
         next = get();
@@ -4619,10 +4630,8 @@ LibraryManager.library = {
 
   __strtok_state: 0,
   strtok__deps: ['__strtok_state', 'strtok_r'],
+  strtok__postset: '___strtok_state = Runtime.staticAlloc(4);',
   strtok: function(s, delim) {
-    if (!___strtok_state) {
-      ___strtok_state = _malloc(4);
-    }
     return _strtok_r(s, delim, ___strtok_state);
   },
 
