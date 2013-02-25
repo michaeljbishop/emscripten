@@ -122,7 +122,7 @@ var LibraryGL = {
       var result;
       var attrib = GL.immediate.clientAttributeIndexForGLEnum(cap);
       if ( attrib === null )
-        result = Module.ctx.getParameter(name_);
+        result = Module.ctx.getParameter(cap);
       else
         result = GL.immediate.enabledClientAttributes[attrib];
       return result;
