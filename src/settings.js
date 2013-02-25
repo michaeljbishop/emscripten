@@ -92,13 +92,9 @@ var PRECISE_I64_MATH = 1; // If enabled, i64 addition etc. is emulated - which i
                           // that we can't know at compile time that 64-bit math is needed. For example, if you
                           // print 64-bit values with printf, but never add them, we can't know at compile time
                           // and you need to set this to 2.
-var PRECISE_I32_MUL = 0; // If enabled, i64 math is done in i32 multiplication. This is necessary if the values
-                         // exceed the JS double-integer limit of ~52 bits. This option can normally be disabled
-                         // because generally i32 multiplication works ok without it, and enabling it has a big
-                         // impact on performance.
-                         // Note that you can hand-optimize your code to avoid the need for this: If you do
-                         // multiplications that actually need 64-bit precision inside 64-bit values, things
-                         // will work properly. (Unless the LLVM optimizer turns them into 32-bit values?)
+var PRECISE_I32_MUL = 1; // If enabled, i32 multiplication is done with full precision, which means it is
+                         // correct even if the value exceeds the JS double-integer limit of ~52 bits (otherwise,
+                         // rounding will occur above that range).
 
 var CLOSURE_ANNOTATIONS = 0; // If set, the generated code will be annotated for the closure
                              // compiler. This potentially lets closure optimize the code better.
@@ -163,6 +159,7 @@ var SOCKET_DEBUG = 0; // Log out socket/network data transfer.
 var GL_DEBUG = 0; // Print out all calls into WebGL. As with LIBRARY_DEBUG, you can set a runtime
                   // option, in this case GL.debug.
 var GL_MAX_TEMP_BUFFER_SIZE = 2097152; // How large GL emulation temp buffers are
+var GL_UNSAFE_OPTS = 1; // Enables some potentially-unsafe optimizations in GL emulation code
 
 var DISABLE_EXCEPTION_CATCHING = 0; // Disables generating code to actually catch exceptions. If the code you
                                     // are compiling does not actually rely on catching exceptions (but the
@@ -324,7 +321,6 @@ var BENCHMARK = 0; // If 1, will just time how long main() takes to execute, and
 var ASM_JS = 0; // If 1, generate code in asm.js format. XXX This is highly experimental,
                 // and will not work on most codebases yet. It is NOT recommended that you
                 // try this yet.
-var USE_MATH_IMUL = 0; // If 1, use Math.imul when useful
 
 var EXPLICIT_ZEXT = 0; // If 1, generate an explicit conversion of zext i1 to i32, using ?:
 

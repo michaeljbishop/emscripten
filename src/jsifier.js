@@ -478,8 +478,7 @@ function JSify(data, functionsOnly, givenFunctions) {
           ident = '_' + ident;
         }
         var depsText = (deps ? '\n' + deps.map(addFromLibrary).filter(function(x) { return x != '' }).join('\n') : '');
-        // redirected idents just need a var, but no value assigned to them - it would be unused
-        var contentText = isFunction ? snippet : ('var ' + ident + (redirectedIdent ? '' : '=' + snippet) + ';');
+        var contentText = isFunction ? snippet : ('var ' + ident + '=' + snippet + ';');
         if (ASM_JS) {
           var sig = LibraryManager.library[ident.substr(1) + '__sig'];
           if (isFunction && sig && LibraryManager.library[ident.substr(1) + '__asm']) {
@@ -508,7 +507,7 @@ function JSify(data, functionsOnly, givenFunctions) {
         item.JS = addFromLibrary(shortident);
       } else {
         item.JS = 'var ' + item.ident + '; // stub for ' + item.ident;
-        if (WARN_ON_UNDEFINED_SYMBOLS) {
+        if (WARN_ON_UNDEFINED_SYMBOLS || ASM_JS) { // always warn on undefs in asm, since it breaks validation
           warn('Unresolved symbol: ' + item.ident);
         }
       }
@@ -1512,7 +1511,7 @@ function JSify(data, functionsOnly, givenFunctions) {
         print('// ASM_LIBRARY FUNCTIONS');
         function fix(f) { // fix indenting to not confuse js optimizer
           f = f.substr(f.indexOf('f')); // remove initial spaces before 'function'
-          f = f.substr(0, f.lastIndexOf('\n')+1); // remove spaces and last }
+          f = f.substr(0, f.lastIndexOf('\n')+1); // remove spaces and last }  XXX assumes function has multiple lines
           return f + '}'; // add unindented } to match function
         }
         print(asmLibraryFunctions.map(fix).join('\n'));

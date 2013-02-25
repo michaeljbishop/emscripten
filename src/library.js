@@ -2491,6 +2491,17 @@ LibraryManager.library = {
         continue;
       }
 
+      // TODO: Support strings like "%5c" etc.
+      if (format[formatIndex] === '%' && format[formatIndex+1] == 'c') {
+        var argPtr = {{{ makeGetValue('varargs', 'argIndex', 'void*') }}};
+        argIndex += Runtime.getNativeFieldSize('void*');
+        fields++;
+        next = get();
+        {{{ makeSetValue('argPtr', 0, 'next', 'i8') }}}
+        formatIndex += 2;
+        continue;
+      }
+
       // remove whitespace
       while (1) {
         next = get();
@@ -4514,11 +4525,16 @@ LibraryManager.library = {
     return 0;
   },
 
+  memcmp__asm: 'true',
+  memcmp__sig: 'iiii',
   memcmp: function(p1, p2, num) {
-    for (var i = 0; i < num; i++) {
-      var v1 = {{{ makeGetValue('p1', 'i', 'i8', 0, 1) }}};
-      var v2 = {{{ makeGetValue('p2', 'i', 'i8', 0, 1) }}};
-      if (v1 != v2) return v1 > v2 ? 1 : -1;
+    p1 = p1|0; p2 = p2|0; num = num|0;
+    var i = 0, v1 = 0, v2 = 0;
+    while ((i|0) < (num|0)) {
+      var v1 = {{{ makeGetValueAsm('p1', 'i', 'i8', true) }}};
+      var v2 = {{{ makeGetValueAsm('p2', 'i', 'i8', true) }}};
+      if ((v1|0) != (v2|0)) return (v1|0) > (v2|0) ? 1 : -1;
+      i = (i+1)|0;
     }
     return 0;
   },
@@ -4619,10 +4635,8 @@ LibraryManager.library = {
 
   __strtok_state: 0,
   strtok__deps: ['__strtok_state', 'strtok_r'],
+  strtok__postset: '___strtok_state = Runtime.staticAlloc(4);',
   strtok: function(s, delim) {
-    if (!___strtok_state) {
-      ___strtok_state = _malloc(4);
-    }
     return _strtok_r(s, delim, ___strtok_state);
   },
 

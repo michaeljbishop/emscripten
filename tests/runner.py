@@ -1139,7 +1139,6 @@ m_divisor is 1091269979
     def test_i32_mul_precise(self):
       if self.emcc_args == None: return self.skip('needs ta2')
 
-      self.emcc_args += ['-s', 'PRECISE_I32_MUL=1']
       src = r'''
         #include <stdio.h>
 
@@ -1154,6 +1153,8 @@ m_divisor is 1091269979
       self.do_run(src, '3217489085')
 
     def test_i32_mul_semiprecise(self):
+      Settings.PRECISE_I32_MUL = 0 # we want semiprecise here
+
       src = r'''
         #include <stdio.h>
 
@@ -4132,10 +4133,12 @@ The current type of b is: 9
           '''
         self.do_run(src, '*0.00,0.00,0.00*\n*0,77,0*\n*0,77,0*\n*0,77,0*')
 
-    def test_memcpy(self):
+    def test_memcpy_memcmp(self):
         src = '''
           #include <stdio.h>
           #include <string.h>
+          #include <assert.h>
+
           #define MAXX 48
           void reset(unsigned char *buffer) {
             for (int i = 0; i < MAXX; i++) buffer[i] = i+1;
@@ -4156,6 +4159,20 @@ The current type of b is: 9
                   reset(buffer);
                   memcpy(buffer+i, buffer+j, k);
                   dump(buffer);
+                  assert(memcmp(buffer+i, buffer+j, k) == 0);
+                  buffer[i + k/2]++;
+                  if (buffer[i + k/2] != 0) {
+                    assert(memcmp(buffer+i, buffer+j, k) > 0);
+                  } else {
+                    assert(memcmp(buffer+i, buffer+j, k) < 0);
+                  }
+                  buffer[i + k/2]--;
+                  buffer[j + k/2]++;
+                  if (buffer[j + k/2] != 0) {
+                    assert(memcmp(buffer+i, buffer+j, k) < 0);
+                  } else {
+                    assert(memcmp(buffer+i, buffer+j, k) > 0);
+                  }
                 }
               }
             }
@@ -5349,8 +5366,29 @@ Pass: 0.000012 0.000012''')
           return(0);
         }
       '''
-
       self.do_run(src, '3\nday 19, month Nov, year 2012');
+
+    def test_sscanf_5(self):
+      src = r'''
+        #include "stdio.h"
+
+        static const char *colors[] = {
+          "  c black",
+          ". c #001100",
+          "X c #111100"
+        };
+
+        int main(){
+          unsigned char code;
+          char color[32];
+          int rcode;
+          for(int i = 0; i < 3; i++) {
+            rcode = sscanf(colors[i], "%c c %s", &code, color);
+            printf("%i, %c, %s\n", rcode, code, color);
+          }
+        }
+      '''
+      self.do_run(src, '2,  , black\n2, ., #001100\n2, X, #111100');
 
     def test_langinfo(self):
       src = open(path_from_root('tests', 'langinfo', 'test.c'), 'r').read()
@@ -7159,6 +7197,16 @@ def process(filename):
       finally:
         del os.environ['EMCC_LEAVE_INPUTS_RAW']
 
+    def test_fuzz(self):
+      if Settings.USE_TYPED_ARRAYS != 2: return self.skip('needs ta2')
+
+      Building.COMPILER_TEST_OPTS += ['-I' + path_from_root('tests', 'fuzz')]
+
+      for name in glob.glob(path_from_root('tests', 'fuzz', '*.c')):
+        print name
+        self.do_run(open(path_from_root('tests', 'fuzz', name)).read(),
+                    open(path_from_root('tests', 'fuzz', name + '.txt')).read(), force_c=True)
+
     # Autodebug the code
     def do_autodebug(self, filename):
       output = Popen([PYTHON, AUTODEBUGGER, filename+'.o.ll', filename+'.o.ll.ll'], stdout=PIPE, stderr=self.stderr_redirect).communicate()[0]
@@ -8747,6 +8795,21 @@ f.close()
       Building.emcc(main_name, ['-L.', '-lLIB', a_name+'.o', c_name + '.o'], output_filename='a.out.js')
 
       self.assertContained('result: 62', run_js(os.path.join(self.get_dir(), 'a.out.js')))
+
+    def test_asm_undefined(self):
+      src = r'''
+        #include <stdio.h>
+        extern void doit();
+        int main(int argc, char **argv) {
+          if (argc == 121) doit();
+          printf("done\n");
+          return 1;
+        }
+      '''
+      filename = self.in_dir('src.cpp')
+      open(filename, 'w').write(src)
+      out, err = Popen([PYTHON, EMCC, filename, '-s', 'ASM_JS=1', '-O2'], stderr=PIPE).communicate()
+      assert 'Warning: Unresolved symbol' in err, 'always warn on undefs in asm, since it breaks validation'
 
     def test_redundant_link(self):
       lib = "int mult() { return 1; }"
@@ -10619,6 +10682,12 @@ elif 'browser' in str(sys.argv):
     def test_cubegeom_pre_vao(self):
       self.btest('cubegeom_pre_vao.c', expected=['-1472804742', '-1626058463', '-2046234971'])
 
+    def test_cubegeom_pre2_vao(self):
+      self.btest('cubegeom_pre2_vao.c', expected=['-1472804742', '-1626058463', '-2046234971'])
+
+    def test_cubegeom_pre2_vao2(self):
+      self.btest('cubegeom_pre2_vao2.c', expected=['-790445118'])
+
     def test_cube_explosion(self):
       self.btest('cube_explosion.c', expected=['667220544', '-1543354600', '-1485258415'])
 
@@ -11738,7 +11807,7 @@ fi
           (['--jcache'], 'hello_libcxx.cpp', False, True, False, True, False, True, []),
           ([], 'hello_libcxx.cpp', False, False, False, False, False, False, []),
           # finally, build a file close to the previous, to see that some chunks are found in the cache and some not
-          (['--jcache'], 'hello_libcxx_mod1.cpp', False, True, True, True, True, False, []), # win on pre, mix on funcs, lose on jsfuncs
+          (['--jcache'], 'hello_libcxx_mod1.cpp', False, True, True, True, True, True, []), # win on pre, mix on funcs, mix on jsfuncs
           (['--jcache'], 'hello_libcxx_mod1.cpp', False, True, False, True, False, True, []),
         ]:
           print >> sys.stderr, args, input_file, expect_pre_save, expect_pre_load, expect_funcs_save, expect_funcs_load, expect_jsfuncs_save, expect_jsfuncs_load, expected

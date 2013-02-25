@@ -1006,6 +1006,7 @@ var LibraryGL = {
     // VAO support
     vaos: [],
     currentVao: null,
+    enabledVertexAttribArrays: {}, // helps with vao cleanups
 
     init: function() {
       GLEmulation.fogColor = new Float32Array(4);
@@ -1400,12 +1401,14 @@ var LibraryGL = {
       var glEnableVertexAttribArray = _glEnableVertexAttribArray;
       _glEnableVertexAttribArray = function(index) {
         glEnableVertexAttribArray(index);
+        GLEmulation.enabledVertexAttribArrays[index] = 1;
         if (GLEmulation.currentVao) GLEmulation.currentVao.enabledVertexAttribArrays[index] = 1;
       };
 
       var glDisableVertexAttribArray = _glDisableVertexAttribArray;
       _glDisableVertexAttribArray = function(index) {
         glDisableVertexAttribArray(index);
+        delete GLEmulation.enabledVertexAttribArrays[index];
         if (GLEmulation.currentVao) delete GLEmulation.currentVao.enabledVertexAttribArrays[index];
       };
 
@@ -1479,6 +1482,9 @@ var LibraryGL = {
         case 'glIsFramebuffer': ret = {{{ Functions.getIndex('_glIsFramebuffer', true) }}}; break;
         case 'glCheckFramebufferStatus': ret = {{{ Functions.getIndex('_glCheckFramebufferStatus', true) }}}; break;
         case 'glRenderbufferStorage': ret = {{{ Functions.getIndex('_glRenderbufferStorage', true) }}}; break;
+        case 'glGenVertexArrays': ret = {{{ Functions.getIndex('_glGenVertexArrays', true) }}}; break;
+        case 'glDeleteVertexArrays': ret = {{{ Functions.getIndex('_glDeleteVertexArrays', true) }}}; break;
+        case 'glBindVertexArray': ret = {{{ Functions.getIndex('_glBindVertexArray', true) }}}; break;
       }
       if (!ret) Module.printErr('WARNING: getProcAddress failed for ' + name);
       return ret;
@@ -1918,27 +1924,35 @@ var LibraryGL = {
           }
 
           // If the array buffer is unchanged and the renderer as well, then we can avoid all the work here
-          // XXX We use some heuristics here, and this may not work in all cases. Try disabling this if you
-          // have odd glitches (by setting canSkip always to 0, or even cleaning up the renderer right
-          // after rendering)
+          // XXX We use some heuristics here, and this may not work in all cases. Try disabling GL_UNSAFE_OPTS if you
+          // have odd glitches
+#if GL_UNSAFE_OPTS
           var lastRenderer = GL.immediate.lastRenderer;
           var canSkip = this == lastRenderer &&
                         arrayBuffer == GL.immediate.lastArrayBuffer &&
                         (GL.currProgram || this.program) == GL.immediate.lastProgram &&
                         !GL.immediate.matricesModified;
           if (!canSkip && lastRenderer) lastRenderer.cleanup();
+#endif
           if (!GL.currArrayBuffer) {
             // Bind the array buffer and upload data after cleaning up the previous renderer
+#if GL_UNSAFE_OPTS
+            // Potentially unsafe, since lastArrayBuffer might not reflect the true array buffer in code that mixes immediate/non-immediate
             if (arrayBuffer != GL.immediate.lastArrayBuffer) {
+#endif
               Module.ctx.bindBuffer(Module.ctx.ARRAY_BUFFER, arrayBuffer);
+#if GL_UNSAFE_OPTS
             }
+#endif
             Module.ctx.bufferSubData(Module.ctx.ARRAY_BUFFER, start, GL.immediate.vertexData.subarray(start >> 2, end >> 2));
           }
+#if GL_UNSAFE_OPTS
           if (canSkip) return;
           GL.immediate.lastRenderer = this;
           GL.immediate.lastArrayBuffer = arrayBuffer;
           GL.immediate.lastProgram = GL.currProgram || this.program;
           GL.immediate.matricesModified = false;
+#endif
 
           if (!GL.currProgram) {
             Module.ctx.useProgram(this.program);
@@ -2014,9 +2028,11 @@ var LibraryGL = {
             Module.ctx.bindBuffer(Module.ctx.ARRAY_BUFFER, null);
           }
 
+#if GL_UNSAFE_OPTS
           GL.immediate.lastRenderer = null;
           GL.immediate.lastArrayBuffer = null;
           GL.immediate.lastProgram = null;
+#endif
           GL.immediate.matricesModified = true;
         }
       };
@@ -2261,6 +2277,10 @@ var LibraryGL = {
       if (emulatedElementArrayBuffer) {
         Module.ctx.bindBuffer(Module.ctx.ELEMENT_ARRAY_BUFFER, GL.buffers[GL.currElementArrayBuffer] || null);
       }
+
+#if GL_UNSAFE_OPTS == 0
+      renderer.cleanup();
+#endif
     }
   },
 
@@ -2486,9 +2506,11 @@ var LibraryGL = {
     if (disable && GL.immediate.enabledClientAttributes[attrib]) {
       GL.immediate.enabledClientAttributes[attrib] = false;
       GL.immediate.totalEnabledClientAttributes--;
+      if (GLEmulation.currentVao) delete GLEmulation.currentVao.enabledClientStates[cap];
     } else if (!disable && !GL.immediate.enabledClientAttributes[attrib]) {
       GL.immediate.enabledClientAttributes[attrib] = true;
       GL.immediate.totalEnabledClientAttributes++;
+      if (GLEmulation.currentVao) GLEmulation.currentVao.enabledClientStates[cap] = 1;
     }
     GL.immediate.modifiedClientAttributes = true;
   },
@@ -2517,6 +2539,7 @@ var LibraryGL = {
 
   // Vertex array object (VAO) support. TODO: when the WebGL extension is popular, use that and remove this code and GL.vaos
   glGenVertexArrays__deps: ['$GLEMulation'],
+  glGenVertexArrays__sig: ['vii'],
   glGenVertexArrays: function(n, vaos) {
     for (var i = 0; i < n; i++) {
       var id = GL.getNewId(GLEmulation.vaos); 
@@ -2526,10 +2549,12 @@ var LibraryGL = {
         elementArrayBuffer: 0,
         enabledVertexAttribArrays: {},
         vertexAttribPointers: {},
+        enabledClientStates: {},
       };
       {{{ makeSetValue('vaos', 'i*4', 'id', 'i32') }}};
     }
   },
+  glDeleteVertexArrays__sig: ['vii'],
   glDeleteVertexArrays: function(n, vaos) {
     for (var i = 0; i < n; i++) {
       var id = {{{ makeGetValue('vaos', 'i*4', 'i32') }}};
@@ -2537,10 +2562,22 @@ var LibraryGL = {
       if (GLEmulation.currentVao && GLEmulation.currentVao.id == id) GLEmulation.currentVao = null;
     }
   },
+  glBindVertexArray__sig: ['vi'],
   glBindVertexArray: function(vao) {
+    // undo vao-related things, wipe the slate clean, both for vao of 0 or an actual vao
+    GLEmulation.currentVao = null; // make sure the commands we run here are not recorded
+    if (GL.immediate.lastRenderer) GL.immediate.lastRenderer.cleanup();
+    _glBindBuffer(Module.ctx.ARRAY_BUFFER, 0); // XXX if one was there before we were bound?
+    _glBindBuffer(Module.ctx.ELEMENT_ARRAY_BUFFER, 0);
+    for (var vaa in GLEmulation.enabledVertexAttribArrays) {
+      Module.ctx.disableVertexAttribArray(vaa);
+    }
+    GLEmulation.enabledVertexAttribArrays = {};
+    GL.immediate.enabledClientAttributes = [0, 0];
+    GL.immediate.totalEnabledClientAttributes = 0;
+    GL.immediate.modifiedClientAttributes = true;
     if (vao) {
       // replay vao
-      if (GLEmulation.currentVao) _glBindVertexArray(0); // flush the old one out
       var info = GLEmulation.vaos[vao];
       _glBindBuffer(Module.ctx.ARRAY_BUFFER, info.arrayBuffer); // XXX overwrite current binding?
       _glBindBuffer(Module.ctx.ELEMENT_ARRAY_BUFFER, info.elementArrayBuffer);
@@ -2550,16 +2587,10 @@ var LibraryGL = {
       for (var vaa in info.vertexAttribPointers) {
         _glVertexAttribPointer.apply(null, info.vertexAttribPointers[vaa]);
       }
-      GLEmulation.currentVao = info; // set currentVao last, so the commands we ran here were not recorded
-    } else if (GLEmulation.currentVao) {
-      // undo vao
-      var info = GLEmulation.currentVao;
-      GLEmulation.currentVao = null; // set currentVao first, so the commands we run here are not recorded
-      _glBindBuffer(Module.ctx.ARRAY_BUFFER, 0); // XXX if one was there before we were bound?
-      _glBindBuffer(Module.ctx.ELEMENT_ARRAY_BUFFER, 0);
-      for (var vaa in info.enabledVertexAttribArrays) {
-        _glDisableVertexAttribArray(vaa);
+      for (var attrib in info.enabledClientStates) {
+        _glEnableClientState(attrib|0);
       }
+      GLEmulation.currentVao = info; // set currentVao last, so the commands we ran here were not recorded
     }
   },
 
@@ -2784,6 +2815,7 @@ var LibraryGL = {
   glGenVertexArraysOES: 'glGenVertexArrays',
   glDeleteVertexArraysOES: 'glDeleteVertexArrays',
   glBindVertexArrayOES: 'glBindVertexArray',
+  glFramebufferTexture2DOES: 'glFramebufferTexture2D'
 };
 
 // Simple pass-through functions. Starred ones have return values. [X] ones have X in the C name but not in the JS name
