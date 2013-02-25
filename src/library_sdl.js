@@ -1206,6 +1206,7 @@ var LibrarySDL = {
   },
 
   Mix_Volume: function(channel, volume) {
+    console.log("Mix_Volume("+channel+", "+volume+")");
     if (channel == -1) {
       for (var i = 0; i < SDL.numChannels-1; i++) {
         _Mix_Volume(i, volume);
@@ -1220,6 +1221,7 @@ var LibrarySDL = {
   },
 
   Mix_LoadWAV_RW: function(filename, freesrc) {
+    console.log("Mix_LoadWAV_RW("+filename+", "+freesrc+")");
     filename = FS.standardizePath(Pointer_stringify(filename));
     var raw = Module["preloadedAudios"][filename];
     if (!raw) {
@@ -1264,6 +1266,7 @@ var LibrarySDL = {
   },
 
   Mix_PlayChannel: function(channel, id, loops) {
+    console.log("Mix_PlayChannel("+channel+", "+id+", "+loops+")");
     // TODO: handle loops
 
     // Get the audio element associated with the ID
@@ -1355,6 +1358,7 @@ var LibrarySDL = {
   },
 
   Mix_HaltChannel: function(channel) {
+    console.log("Mix_HaltChannel("+channel+")");
     var info = SDL.channels[channel];
     if (info.audio) {
       info.audio.pause();
@@ -1401,6 +1405,7 @@ var LibrarySDL = {
   },
 
   Mix_PauseMusic: function() {
+    console.log("Mix_PauseMusic");
     var audio = SDL.music.audio;
     if (!audio) return 0;
     audio.pause();
@@ -1408,6 +1413,7 @@ var LibrarySDL = {
   },
 
   Mix_ResumeMusic: function() {
+    console.log("Mix_ResumeMusic");
     var audio = SDL.music.audio;
     if (!audio) return 0;
     audio.play();
@@ -1415,6 +1421,7 @@ var LibrarySDL = {
   },
 
   Mix_HaltMusic: function() {
+    console.log("Mix_HaltMusic");
     var audio = SDL.music.audio;
     if (!audio) return 0;
     audio.src = audio.src; // rewind
@@ -1450,6 +1457,7 @@ var LibrarySDL = {
   },
   
   Mix_Pause: function(id) {
+    console.log("Mix_Pause");
     if (id === -1) {
         for (var i = 0; i<SDL.audios.length;i++)
           SDL.Mix_Pause(i);
@@ -1481,6 +1489,7 @@ var LibrarySDL = {
 
   // http://www.libsdl.org/projects/SDL_mixer/docs/SDL_mixer_33.html#SEC33
   Mix_Resume: function(id) {
+    console.log("Mix_Resume");
     if (id === -1)
     {
         for (var i = 0; i<SDL.audios.length;i++)
