@@ -150,6 +150,25 @@ function SAFE_HEAP_COPY_HISTORY(dest, src) {
 //==========================================
 #endif
 
+#if CHECK_HEAP_ALIGN
+//========================================
+// Debugging tools - alignment check
+//========================================
+function CHECK_ALIGN_8(addr) {
+  assert((addr & 7) == 0, "address must be 8-byte aligned, is " + addr + "!");
+  return addr;
+}
+function CHECK_ALIGN_4(addr) {
+  assert((addr & 3) == 0, "address must be 4-byte aligned, is " + addr + "!");
+  return addr;
+}
+function CHECK_ALIGN_2(addr) {
+  assert((addr & 1) == 0, "address must be 2-byte aligned!");
+  return addr;
+}
+#endif
+
+
 #if CHECK_OVERFLOWS
 //========================================
 // Debugging tools - Mathop overflows
@@ -251,11 +270,9 @@ Module["ccall"] = ccall;
 // Returns the C function with a specified identifier (for C++, you need to do manual name mangling)
 function getCFunc(ident) {
   try {
-    var func = eval('_' + ident);
+    var func = globalScope['Module']['_' + ident]; // closure exported function
+    if (!func) func = eval('_' + ident); // explicit lookup
   } catch(e) {
-    try {
-      func = globalScope['Module']['_' + ident]; // closure exported function
-    } catch(e) {}
   }
   assert(func, 'Cannot call unknown function ' + ident + ' (perhaps LLVM optimizations or closure removed it?)');
   return func;
@@ -447,7 +464,7 @@ function allocate(slab, types, allocator, ptr) {
   }
 #endif
 
-  var i = 0, type;
+  var i = 0, type, typeSize, previousType;
   while (i < size) {
     var curr = slab[i];
 
@@ -469,7 +486,13 @@ function allocate(slab, types, allocator, ptr) {
 #endif
 
     setValue(ret+i, curr, type);
-    i += Runtime.getNativeTypeSize(type);
+
+    // no need to look up size unless type changes, so cache it
+    if (previousType !== type) {
+      typeSize = Runtime.getNativeTypeSize(type);
+      previousType = type;
+    }
+    i += typeSize;
   }
 
   return ret;
@@ -742,17 +765,19 @@ Module['writeArrayToMemory'] = writeArrayToMemory;
 {{{ unSign }}}
 {{{ reSign }}}
 
-if (!Math.imul) Math.imul = function(a, b) {
 #if PRECISE_I32_MUL
+if (!Math.imul) Math.imul = function(a, b) {
   var ah  = a >>> 16;
   var al = a & 0xffff;
   var bh  = b >>> 16;
   var bl = b & 0xffff;
   return (al*bl + ((ah*bl + al*bh) << 16))|0;
-#else
-  return (a*b)|0; // fast but imprecise
-#endif
 };
+#else
+Math.imul = function(a, b) {
+  return (a*b)|0; // fast but imprecise
+};
+#endif
 
 // A counter of dependencies for calling run(). If we need to
 // do asynchronous work before running, increment this and

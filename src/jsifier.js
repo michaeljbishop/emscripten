@@ -505,7 +505,7 @@ function JSify(data, functionsOnly, givenFunctions) {
         item.JS = '';
       } else if (LibraryManager.library.hasOwnProperty(shortident)) {
         item.JS = addFromLibrary(shortident);
-      } else {
+      } else if (!LibraryManager.library.hasOwnProperty(shortident + '__inline')) {
         item.JS = 'var ' + item.ident + '; // stub for ' + item.ident;
         if (WARN_ON_UNDEFINED_SYMBOLS || ASM_JS) { // always warn on undefs in asm, since it breaks validation
           warn('Unresolved symbol: ' + item.ident);
@@ -1401,6 +1401,9 @@ function JSify(data, functionsOnly, givenFunctions) {
       if (ASM_JS) {
         assert(returnType.search(/\("'\[,/) == -1); // XXX need isFunctionType(type, out)
         callIdent = '(' + callIdent + ')&{{{ FTM_' + sig + ' }}}'; // the function table mask is set in emscripten.py
+      } else if (SAFE_DYNCALLS) {
+        assert(!ASM_JS, 'cannot emit safe dyncalls in asm');
+        callIdent = '(tempInt=' + callIdent + ',tempInt < 0 || tempInt >= FUNCTION_TABLE.length-1 || !FUNCTION_TABLE[tempInt] ? abort("dyncall error: ' + sig + ' " + FUNCTION_TABLE_NAMES[tempInt]) : tempInt)';
       }
       callIdent = Functions.getTable(sig) + '[' + callIdent + ']';
     }
@@ -1567,9 +1570,11 @@ function JSify(data, functionsOnly, givenFunctions) {
     var shellParts = read(shellFile).split('{{BODY}}');
     print(shellParts[1]);
     // Print out some useful metadata (for additional optimizations later, like the eliminator)
-    print('// EMSCRIPTEN_GENERATED_FUNCTIONS: ' + JSON.stringify(keys(Functions.implementedFunctions).filter(function(func) {
-      return IGNORED_FUNCTIONS.indexOf(func.ident) < 0;
-    })) + '\n');
+    if (EMIT_GENERATED_FUNCTIONS) {
+      print('// EMSCRIPTEN_GENERATED_FUNCTIONS: ' + JSON.stringify(keys(Functions.implementedFunctions).filter(function(func) {
+        return IGNORED_FUNCTIONS.indexOf(func.ident) < 0;
+      })) + '\n');
+    }
 
     PassManager.serialize();
 

@@ -128,6 +128,11 @@ var SAFE_HEAP = 0; // Check each write to the heap, for example, this will give 
                    // that 3 is the option you usually want here.
 var SAFE_HEAP_LOG = 0; // Log out all SAFE_HEAP operations
 
+var CHECK_HEAP_ALIGN = 0; // Check heap accesses for alignment, but don't do as
+                          // near extensive (or slow) checks as SAFE_HEAP.
+
+var SAFE_DYNCALLS = 0; // Show stack traces on missing function pointer/virtual method calls
+
 var ASM_HEAP_LOG = 0; // Simple heap logging, like SAFE_HEAP_LOG but cheaper, and in asm.js
 
 var CORRUPTION_CHECK = 0; // When enabled, will emit a buffer area at the beginning and
@@ -158,8 +163,11 @@ var SOCKET_DEBUG = 0; // Log out socket/network data transfer.
 
 var GL_DEBUG = 0; // Print out all calls into WebGL. As with LIBRARY_DEBUG, you can set a runtime
                   // option, in this case GL.debug.
+var GL_TESTING = 0; // When enabled, sets preserveDrawingBuffer in the context, to allow tests to work (but adds overhead)
 var GL_MAX_TEMP_BUFFER_SIZE = 2097152; // How large GL emulation temp buffers are
 var GL_UNSAFE_OPTS = 1; // Enables some potentially-unsafe optimizations in GL emulation code
+var FULL_ES2 = 0; // Forces support for all GLES2 features, not just the WebGL-friendly subset.
+var FORCE_GL_EMULATION = 0; // Forces inclusion of full GL emulation code.
 
 var DISABLE_EXCEPTION_CATCHING = 0; // Disables generating code to actually catch exceptions. If the code you
                                     // are compiling does not actually rely on catching exceptions (but the
@@ -325,6 +333,8 @@ var ASM_JS = 0; // If 1, generate code in asm.js format. XXX This is highly expe
 var EXPLICIT_ZEXT = 0; // If 1, generate an explicit conversion of zext i1 to i32, using ?:
 
 var NECESSARY_BLOCKADDRS = []; // List of (function, block) for all block addresses that are taken.
+
+var EMIT_GENERATED_FUNCTIONS = 0; // whether to emit the list of generated functions, needed for external JS optimization passes
 
 // Compiler debugging options
 var DEBUG_TAGS_SHOWING = [];

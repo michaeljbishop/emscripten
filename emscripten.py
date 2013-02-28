@@ -21,6 +21,9 @@ WARNING: You should normally never use this! Use emcc instead.
 from tools import shared
 
 DEBUG = os.environ.get('EMCC_DEBUG')
+if DEBUG == "0":
+  DEBUG = None
+DEBUG_CACHE = DEBUG and "cache" in DEBUG
 
 __rootpath__ = os.path.abspath(os.path.dirname(__file__))
 def path_from_root(*pathelems):
@@ -43,7 +46,7 @@ def scan(ll, settings):
   if len(blockaddrs) > 0:
     settings['NECESSARY_BLOCKADDRS'] = blockaddrs
 
-NUM_CHUNKS_PER_CORE = 5
+NUM_CHUNKS_PER_CORE = 1.25
 MIN_CHUNK_SIZE = 1024*1024
 MAX_CHUNK_SIZE = float(os.environ.get('EMSCRIPT_MAX_CHUNK_SIZE') or 'inf') # configuring this is just for debugging purposes
 
@@ -131,7 +134,7 @@ def emscript(infile, settings, outfile, libraries=[]):
   settings_file = temp_files.get('.txt').name
   def save_settings():
     global settings_text
-    settings_text = json.dumps(settings)
+    settings_text = json.dumps(settings, sort_keys=True)
     s = open(settings_file, 'w')
     s.write(settings_text)
     s.close()
@@ -145,7 +148,21 @@ def emscript(infile, settings, outfile, libraries=[]):
   if jcache:
     keys = [pre_input, settings_text, ','.join(libraries)]
     shortkey = shared.JCache.get_shortkey(keys)
+    if DEBUG_CACHE: print >>sys.stderr, 'shortkey', shortkey
+
     out = shared.JCache.get(shortkey, keys)
+
+    if DEBUG_CACHE and not out:
+      dfpath = os.path.join(shared.TEMP_DIR, "ems_" + shortkey)
+      dfp = open(dfpath, 'w')
+      dfp.write(pre_input);
+      dfp.write("\n\n========================== settings_text\n\n");
+      dfp.write(settings_text);
+      dfp.write("\n\n========================== libraries\n\n");
+      dfp.write("\n".join(libraries))
+      dfp.close()
+      print >>sys.stderr, '  cache miss, key data dumped to %s' % dfpath
+
     if out and DEBUG: print >> sys.stderr, '  loading pre from jcache'
   if not out:
     open(pre_file, 'w').write(pre_input)
@@ -160,12 +177,12 @@ def emscript(infile, settings, outfile, libraries=[]):
 
   # Phase 2 - func
 
-  cores = multiprocessing.cpu_count()
+  cores = int(os.environ.get('EMCC_CORES') or multiprocessing.cpu_count())
   assert cores >= 1
   if cores > 1:
-    intended_num_chunks = cores * NUM_CHUNKS_PER_CORE
+    intended_num_chunks = int(round(cores * NUM_CHUNKS_PER_CORE))
     chunk_size = max(MIN_CHUNK_SIZE, total_ll_size / intended_num_chunks)
-    chunk_size += 3*len(meta) # keep ratio of lots of function code to meta (expensive to process, and done in each parallel task)
+    chunk_size += 3*len(meta) + len(forwarded_data)/3 # keep ratio of lots of function code to meta (expensive to process, and done in each parallel task) and forwarded data (less expensive but potentially significant)
     chunk_size = min(MAX_CHUNK_SIZE, chunk_size)
   else:
     chunk_size = MAX_CHUNK_SIZE # if 1 core, just use the max chunk size
@@ -317,7 +334,7 @@ def emscript(infile, settings, outfile, libraries=[]):
       params = ','.join(['p%d' % p for p in range(len(sig)-1)])
       coercions = ';'.join(['p%d = %sp%d%s' % (p, '+' if sig[p+1] != 'i' else '', p, '' if sig[p+1] != 'i' else '|0') for p in range(len(sig)-1)]) + ';'
       ret = '' if sig[0] == 'v' else ('return %s0' % ('+' if sig[0] != 'i' else ''))
-      return ('function %s(%s) { %s abort(%d); %s };' % (bad, params, coercions, i, ret), raw.replace('[0,', '[' + bad + ',').replace(',0,', ',' + bad + ',').replace(',0,', ',' + bad + ',').replace(',0]', ',' + bad + ']').replace(',0]', ',' + bad + ']'))
+      return ('function %s(%s) { %s abort(%d); %s };' % (bad, params, coercions, i, ret), raw.replace('[0,', '[' + bad + ',').replace(',0,', ',' + bad + ',').replace(',0,', ',' + bad + ',').replace(',0]', ',' + bad + ']').replace(',0]', ',' + bad + ']').replace(',0\n', ',' + bad + '\n'))
     infos = [make_table(sig, raw) for sig, raw in last_forwarded_json['Functions']['tables'].iteritems()]
     function_tables_defs = '\n'.join([info[0] for info in infos] + [info[1] for info in infos])
 
@@ -328,6 +345,7 @@ def emscript(infile, settings, outfile, libraries=[]):
     asm_setup += '\n'.join(['var %s = %s;' % (f.replace('.', '_'), f) for f in math_envs])
     basic_funcs = ['abort', 'assert', 'asmPrintInt', 'asmPrintFloat', 'copyTempDouble', 'copyTempFloat'] + [m.replace('.', '_') for m in math_envs]
     if settings['SAFE_HEAP']: basic_funcs += ['SAFE_HEAP_LOAD', 'SAFE_HEAP_STORE', 'SAFE_HEAP_CLEAR']
+    if settings['CHECK_HEAP_ALIGN']: basic_funcs += ['CHECK_ALIGN_2', 'CHECK_ALIGN_4', 'CHECK_ALIGN_8']
     basic_vars = ['STACKTOP', 'STACK_MAX', 'tempDoublePtr', 'ABORT']
     basic_float_vars = ['NaN', 'Infinity']
     if forwarded_json['Types']['preciseI64MathUsed']:

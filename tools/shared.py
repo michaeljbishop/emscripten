@@ -28,7 +28,10 @@ class WindowsPopen:
         self.stderr_ = PIPE
   
     # Call the process with fixed streams.
-    self.process = subprocess.Popen(args, bufsize, executable, self.stdin_, self.stdout_, self.stderr_, preexec_fn, close_fds, shell, cwd, env, universal_newlines, startupinfo, creationflags)
+    try:
+      self.process = subprocess.Popen(args, bufsize, executable, self.stdin_, self.stdout_, self.stderr_, preexec_fn, close_fds, shell, cwd, env, universal_newlines, startupinfo, creationflags)
+    except Exception, e:
+      print >> sys.stderr, 'subprocess.Popen(args=%s) failed! Exception %s' % (' '.join(args), str(e))
 
   def communicate(self, input=None):
     output = self.process.communicate(input)
@@ -295,6 +298,10 @@ CANONICAL_TEMP_DIR = os.path.join(TEMP_DIR, 'emscripten_temp')
 EMSCRIPTEN_TEMP_DIR = None
 
 DEBUG = os.environ.get('EMCC_DEBUG')
+if DEBUG == "0":
+  DEBUG = None
+DEBUG_CACHE = DEBUG and "cache" in DEBUG
+
 if DEBUG:
   try:
     EMSCRIPTEN_TEMP_DIR = CANONICAL_TEMP_DIR
@@ -554,7 +561,7 @@ class Settings:
         ret = []
         for key, value in Settings.__dict__.iteritems():
           if key == key.upper(): # this is a hack. all of our settings are ALL_CAPS, python internals are not
-            jsoned = json.dumps(value)
+            jsoned = json.dumps(value, sort_keys=True)
             ret += ['-s', key + '=' + jsoned]
         return ret
 
@@ -563,6 +570,7 @@ class Settings:
         if opt_level >= 1:
           Settings.ASSERTIONS = 0
           Settings.DISABLE_EXCEPTION_CATCHING = 1
+          Settings.EMIT_GENERATED_FUNCTIONS = 1
         if opt_level >= 2:
           Settings.RELOOP = 1
         if opt_level >= 3:
@@ -749,12 +757,16 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)''' % { 'winfix': '' if not WINDOWS e
     resolved_symbols = set()
     temp_dirs = []
     files = map(os.path.abspath, files)
+    has_ar = False
+    for f in files:
+      has_ar = has_ar or Building.is_ar(f)
     for f in files:
       if not Building.is_ar(f):
         if Building.is_bitcode(f):
-          new_symbols = Building.llvm_nm(f)
-          resolved_symbols = resolved_symbols.union(new_symbols.defs)
-          unresolved_symbols = unresolved_symbols.union(new_symbols.undefs.difference(resolved_symbols)).difference(new_symbols.defs)
+          if has_ar:
+            new_symbols = Building.llvm_nm(f)
+            resolved_symbols = resolved_symbols.union(new_symbols.defs)
+            unresolved_symbols = unresolved_symbols.union(new_symbols.undefs.difference(resolved_symbols)).difference(new_symbols.defs)
           actual_files.append(f)
       else:
         # Extract object files from ar archives, and link according to gnu ld semantics
@@ -807,7 +819,37 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)''' % { 'winfix': '' if not WINDOWS e
     # Finish link
     actual_files = unique_ordered(actual_files) # tolerate people trying to link a.so a.so etc.
     if DEBUG: print >>sys.stderr, 'emcc: llvm-linking:', actual_files
-    output = Popen([LLVM_LINK] + actual_files + ['-o', target], stdout=PIPE).communicate()[0]
+
+    # check for too-long command line
+    link_cmd = [LLVM_LINK] + actual_files + ['-o', target]
+    # 8k is a bit of an arbitrary limit, but a reasonable one
+    # for max command line size before we use a respose file
+    response_file = None
+    if WINDOWS and len(' '.join(link_cmd)) > 8192:
+      if DEBUG: print >>sys.stderr, 'using response file for llvm-link'
+      [response_fd, response_file] = mkstemp(suffix='.response', dir=TEMP_DIR)
+
+      link_cmd = [LLVM_LINK, "@" + response_file]
+
+      response_fh = os.fdopen(response_fd, 'w')
+      for arg in actual_files:
+        # we can't put things with spaces in the response file
+        if " " in arg:
+          link_cmd.append(arg)
+        else:
+          response_fh.write(arg + "\n")
+      response_fh.close()
+      link_cmd.append("-o")
+      link_cmd.append(target)
+
+      if len(' '.join(link_cmd)) > 8192:
+        print >>sys.stderr, 'emcc: warning: link command line is very long, even with response file -- use paths with no spaces'
+
+    output = Popen(link_cmd, stdout=PIPE).communicate()[0]
+
+    if response_file:
+      os.unlink(response_file)
+
     assert os.path.exists(target) and (output is None or 'Could not open input file' not in output), 'Linking error: ' + output
     for temp_dir in temp_dirs:
       try_delete(temp_dir)
@@ -866,8 +908,14 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)''' % { 'winfix': '' if not WINDOWS e
     assert os.path.exists(output_filename), 'Could not create bc file: ' + output
     return output_filename
 
+  nm_cache = {} # cache results of nm - it can be slow to run
+
   @staticmethod
   def llvm_nm(filename, stdout=PIPE, stderr=None):
+    if filename in Building.nm_cache:
+      #if DEBUG: print >> sys.stderr, 'loading nm results for %s from cache' % filename
+      return Building.nm_cache[filename]
+
     # LLVM binary ==> list of symbols
     output = Popen([LLVM_NM, filename], stdout=stdout, stderr=stderr).communicate()[0]
     class ret:
@@ -888,6 +936,7 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)''' % { 'winfix': '' if not WINDOWS e
     ret.defs = set(ret.defs)
     ret.undefs = set(ret.undefs)
     ret.commons = set(ret.commons)
+    Building.nm_cache[filename] = ret
     return ret
 
   @staticmethod
@@ -1088,24 +1137,6 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)''' % { 'winfix': '' if not WINDOWS e
 
   @staticmethod
   def is_bitcode(filename):
-    # checks if a file contains LLVM bitcode
-    # if the file doesn't exist or doesn't have valid symbols, it isn't bitcode
-    try:
-      defs = Building.llvm_nm(filename, stderr=PIPE)
-      # If no symbols found, it might just be an empty bitcode file, try to dis it
-      if len(defs.defs) + len(defs.undefs) + len(defs.commons) == 0:
-        # llvm-nm 3.0 has a bug when reading symbols from ar files
-        # so try to see if we're dealing with an ar file, in which
-        # case we should try to dis it.
-        if not Building.is_ar(filename):
-          test_ll = os.path.join(EMSCRIPTEN_TEMP_DIR, 'test.ll')
-          Building.llvm_dis(filename, test_ll)
-          assert os.path.exists(test_ll)
-          try_delete(test_ll)
-    except Exception, e:
-      if DEBUG: print >> sys.stderr, 'shared.Building.is_bitcode failed to test whether file \'%s\' is a llvm bitcode file! Failed on exception: %s' % (filename, e)
-      return False
-
     # look for magic signature
     b = open(filename, 'r').read(4)
     if b[0] == 'B' and b[1] == 'C':
@@ -1181,6 +1212,10 @@ class Cache:
     except:
       pass
     try_delete(RELOOPER)
+    try:
+      open(Cache.dirname + '__last_clear', 'w').write('last clear: ' + time.asctime() + '\n')
+    except:
+      print >> sys.stderr, 'failed to save last clear time'
 
   # Request a cached file. If it isn't in the cache, it will be created with
   # the given creator function
@@ -1223,29 +1258,30 @@ class JCache:
   # Returns a cached value, if it exists. Make sure the full key matches
   @staticmethod
   def get(shortkey, keys):
-    #if DEBUG: print >> sys.stderr, 'jcache get?', shortkey
+    if DEBUG_CACHE: print >> sys.stderr, 'jcache get?', shortkey
     cachename = JCache.get_cachename(shortkey)
     if not os.path.exists(cachename):
-      #if DEBUG: print >> sys.stderr, 'jcache none at all'
+      if DEBUG_CACHE: print >> sys.stderr, 'jcache none at all'
       return
     data = cPickle.Unpickler(open(cachename, 'rb')).load()
     if len(data) != 2:
-      #if DEBUG: print >> sys.stderr, 'jcache error in get'
+      if DEBUG_CACHE: print >> sys.stderr, 'jcache error in get'
       return
     oldkeys = data[0]
     if len(oldkeys) != len(keys):
-      #if DEBUG: print >> sys.stderr, 'jcache collision (a)'
+      if DEBUG_CACHE: print >> sys.stderr, 'jcache collision (a)'
       return
     for i in range(len(oldkeys)):
       if oldkeys[i] != keys[i]:
-        #if DEBUG: print >> sys.stderr, 'jcache collision (b)'
+        if DEBUG_CACHE: print >> sys.stderr, 'jcache collision (b)'
         return
-    #if DEBUG: print >> sys.stderr, 'jcache win'
+    if DEBUG_CACHE: print >> sys.stderr, 'jcache win'
     return data[1]
 
   # Sets the cached value for a key (from get_key)
   @staticmethod
   def set(shortkey, keys, value):
+    if DEBUG_CACHE: print >> sys.stderr, 'save to cache', shortkey
     cachename = JCache.get_cachename(shortkey)
     cPickle.Pickler(open(cachename, 'wb')).dump([keys, value])
     #if DEBUG:
@@ -1269,9 +1305,11 @@ class JCache:
       if os.path.exists(chunking_file):
         try:
           previous_mapping = cPickle.Unpickler(open(chunking_file, 'rb')).load() # maps a function identifier to the chunk number it will be in
-          #if DEBUG: print >> sys.stderr, 'jscache previous mapping', previous_mapping
-        except:
-          pass
+          if DEBUG: print >> sys.stderr, 'jscache previous mapping of size %d loaded from %s' % (len(previous_mapping), chunking_file)
+        except Exception, e:
+          print >> sys.stderr, 'Failed to load and unpickle previous chunking file at %s: ' % chunking_file, e
+      else:
+        print >> sys.stderr, 'Previous chunking file not found at %s' % chunking_file
     chunks = []
     if previous_mapping:
       # initialize with previous chunking
@@ -1334,6 +1372,7 @@ class JCache:
           assert ident not in new_mapping, 'cannot have duplicate names in jcache chunking'
           new_mapping[ident] = i
       cPickle.Pickler(open(chunking_file, 'wb')).dump(new_mapping)
+      if DEBUG: print >> sys.stderr, 'jscache mapping of size %d saved to %s' % (len(new_mapping), chunking_file)
       #if DEBUG:
       #  for i in range(len(chunks)):
       #    chunk = chunks[i]

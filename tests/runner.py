@@ -507,6 +507,8 @@ if 'benchmark' not in str(sys.argv) and 'sanity' not in str(sys.argv) and 'brows
         '''
         self.do_run(src, 'hello, world!')
 
+        assert 'EMSCRIPTEN_GENERATED_FUNCTIONS' not in open(self.in_dir('src.cpp.o.js')).read(), 'must not emit this unneeded internal thing'
+
     def test_intvars(self):
         if self.emcc_args == None: return self.skip('needs ta2')
 
@@ -1153,6 +1155,8 @@ m_divisor is 1091269979
       self.do_run(src, '3217489085')
 
     def test_i32_mul_semiprecise(self):
+      if Settings.ASM_JS: return self.skip('asm is always fully precise')
+
       Settings.PRECISE_I32_MUL = 0 # we want semiprecise here
 
       src = r'''
@@ -2801,6 +2805,37 @@ Exiting setjmp function, level: 0, prev_jmp: -1
           }
         ''' % addr
         self.do_run(src, 'segmentation fault' if addr.isdigit() else 'marfoosh')
+
+    def test_safe_dyncalls(self):
+      if Settings.ASM_JS: return self.skip('asm does not support missing function stack traces')
+      if Settings.SAFE_HEAP: return self.skip('safe heap warning will appear instead')
+      if self.emcc_args is None: return self.skip('need libc')
+
+      Settings.SAFE_DYNCALLS = 1
+
+      for cond, body, work in [(True, True, False), (True, False, False), (False, True, True), (False, False, False)]:
+        print cond, body, work
+        src = r'''
+          #include <stdio.h>
+
+          struct Classey {
+            virtual void doIt() = 0;
+          };
+
+          struct D1 : Classey {
+            virtual void doIt() BODY;
+          };
+
+          int main(int argc, char **argv)
+          {
+            Classey *p = argc COND 100 ? new D1() : NULL;
+            printf("%p\n", p);
+            p->doIt();
+
+            return 0;
+          }
+        '''.replace('COND', '==' if cond else '!=').replace('BODY', r'{ printf("all good\n"); }' if body else '')
+        self.do_run(src, 'dyncall error: vi' if not work else 'all good')
 
     def test_dynamic_cast(self):
         if self.emcc_args is None: return self.skip('need libcxxabi')
@@ -7130,6 +7165,14 @@ def process(filename):
           self.assertIdentical(clean(open('release.js').read()), clean(open('debug%d.js' % debug).read())) # EMCC_DEBUG=1 mode must not generate different code!
           print >> sys.stderr, 'debug check %d passed too' % debug
 
+        try:
+          os.environ['EMCC_FORCE_STDLIBS'] = '1'
+          print 'EMCC_FORCE_STDLIBS'
+          do_test()
+        finally:
+          del os.environ['EMCC_FORCE_STDLIBS']
+        print >> sys.stderr, 'EMCC_FORCE_STDLIBS ok'
+
         try_delete(CANONICAL_TEMP_DIR)
       else:
         print >> sys.stderr, 'not doing debug check'
@@ -9436,8 +9479,8 @@ f.close()
       try:
         os.environ['EMCC_DEBUG'] = '1'
         for asm, linkable, chunks, js_chunks in [
-            (0, 0, 3, 2), (0, 1, 7, 4),
-            (1, 0, 3, 2), (1, 1, 7, 5)
+            (0, 0, 2, 2), (0, 1, 4, 4),
+            (1, 0, 2, 2), (1, 1, 4, 5)
           ]:
           print asm, linkable, chunks, js_chunks
           output, err = Popen([PYTHON, EMCC, path_from_root('tests', 'hello_libcxx.cpp'), '-O1', '-s', 'LINKABLE=%d' % linkable, '-s', 'ASM_JS=%d' % asm], stdout=PIPE, stderr=PIPE).communicate()
@@ -9615,6 +9658,64 @@ seeked= file.
       assert 'yello' in output, 'code works'
       code = open('a.out.js').read()
       assert 'SAFE_HEAP' in code, 'valid -s option had an effect'
+
+    def test_optimize_normally(self):
+      assert not os.environ.get('EMCC_OPTIMIZE_NORMALLY')
+      assert not os.environ.get('EMCC_DEBUG')
+
+      for optimize_normally in [0, 1]:
+        print optimize_normally
+        try:
+          if optimize_normally: os.environ['EMCC_OPTIMIZE_NORMALLY'] = '1'
+          os.environ['EMCC_DEBUG'] = '1'
+
+          open(self.in_dir('main.cpp'), 'w').write(r'''
+            extern "C" {
+              void something();
+            }
+
+            int main() {
+              something();
+              return 0;
+            }
+          ''')
+          open(self.in_dir('supp.cpp'), 'w').write(r'''
+            #include <stdio.h>
+
+            extern "C" {
+              void something() {
+                printf("yello\n");
+              }
+            }
+          ''')
+          out, err = Popen([PYTHON, EMCC, self.in_dir('main.cpp'), '-O2', '-o', 'main.o'], stdout=PIPE, stderr=PIPE).communicate()
+          assert ("emcc: LLVM opts: ['-disable-inlining', '-O3']" in err) == optimize_normally
+          assert (' with -O3 since EMCC_OPTIMIZE_NORMALLY defined' in err) == optimize_normally
+
+          out, err = Popen([PYTHON, EMCC, self.in_dir('supp.cpp'), '-O2', '-o', 'supp.o'], stdout=PIPE, stderr=PIPE).communicate()
+          assert ("emcc: LLVM opts: ['-disable-inlining', '-O3']" in err) == optimize_normally
+          assert (' with -O3 since EMCC_OPTIMIZE_NORMALLY defined' in err) == optimize_normally
+
+          out, err = Popen([PYTHON, EMCC, self.in_dir('main.o'), self.in_dir('supp.o'), '-O2', '-o', 'both.o'], stdout=PIPE, stderr=PIPE).communicate()
+          assert "emcc: LLVM opts: ['-disable-inlining', '-O3']" not in err
+          assert ' with -O3 since EMCC_OPTIMIZE_NORMALLY defined' not in err
+          assert ('despite EMCC_OPTIMIZE_NORMALLY since not source code' in err) == optimize_normally
+
+          out, err = Popen([PYTHON, EMCC, self.in_dir('main.cpp'), self.in_dir('supp.cpp'), '-O2', '-o', 'both2.o'], stdout=PIPE, stderr=PIPE).communicate()
+          assert ("emcc: LLVM opts: ['-disable-inlining', '-O3']" in err) == optimize_normally
+          assert (' with -O3 since EMCC_OPTIMIZE_NORMALLY defined' in err) == optimize_normally
+
+          for last in ['both.o', 'both2.o']:
+            out, err = Popen([PYTHON, EMCC, self.in_dir('both.o'), '-O2', '-o', last + '.js'], stdout=PIPE, stderr=PIPE).communicate()
+            assert ("emcc: LLVM opts: ['-disable-inlining', '-O3']" not in err) == optimize_normally
+            assert ' with -O3 since EMCC_OPTIMIZE_NORMALLY defined' not in err
+            output = run_js(last + '.js')
+            assert 'yello' in output, 'code works'
+          assert open('both.o.js').read() == open('both2.o.js').read()
+
+        finally:
+          if optimize_normally: del os.environ['EMCC_OPTIMIZE_NORMALLY']
+          del os.environ['EMCC_DEBUG']
 
     def test_conftest_s_flag_passing(self):
       open(os.path.join(self.get_dir(), 'conftest.c'), 'w').write(r'''
@@ -10269,6 +10370,28 @@ elif 'browser' in str(sys.argv):
       Popen([PYTHON, EMCC, os.path.join(self.get_dir(), 'sdl_key.c'), '-o', 'page.html', '--pre-js', 'pre.js', '-s', '''EXPORTED_FUNCTIONS=['_main', '_one']''']).communicate()
       self.run_browser('page.html', '', '/report_result?510510')
 
+    def test_sdl_text(self):
+      open(os.path.join(self.get_dir(), 'pre.js'), 'w').write('''
+        Module.postRun = function() {
+          function doOne() {
+            Module._one();
+            setTimeout(doOne, 1000/60);
+          }
+          setTimeout(doOne, 1000/60);
+        }
+
+        function simulateKeyEvent(charCode) {
+          var event = document.createEvent("KeyboardEvent");
+          event.initKeyEvent("keypress", true, true, window,
+                             0, 0, 0, 0, 0, charCode);
+          document.body.dispatchEvent(event);
+        }
+      ''')
+      open(os.path.join(self.get_dir(), 'sdl_text.c'), 'w').write(self.with_report_result(open(path_from_root('tests', 'sdl_text.c')).read()))
+
+      Popen([PYTHON, EMCC, os.path.join(self.get_dir(), 'sdl_text.c'), '-o', 'page.html', '--pre-js', 'pre.js', '-s', '''EXPORTED_FUNCTIONS=['_main', '_one']''']).communicate()
+      self.run_browser('page.html', '', '/report_result?1')
+
     def test_sdl_mouse(self):
       open(os.path.join(self.get_dir(), 'pre.js'), 'w').write('''
         function simulateMouseEvent(x, y, button) {
@@ -10329,56 +10452,56 @@ elif 'browser' in str(sys.argv):
       # SDL, OpenGL, textures, immediate mode. Closure for more coverage
       shutil.copyfile(path_from_root('tests', 'screenshot.png'), os.path.join(self.get_dir(), 'screenshot.png'))
       self.reftest(path_from_root('tests', 'screenshot-gray-purple.png'))
-      Popen([PYTHON, EMCC, path_from_root('tests', 'sdl_ogl.c'), '-O2', '--minify', '0', '-o', 'something.html', '--pre-js', 'reftest.js', '--preload-file', 'screenshot.png']).communicate()
+      Popen([PYTHON, EMCC, path_from_root('tests', 'sdl_ogl.c'), '-O2', '--minify', '0', '-o', 'something.html', '--pre-js', 'reftest.js', '--preload-file', 'screenshot.png', '-s', 'GL_TESTING=1']).communicate()
       self.run_browser('something.html', 'You should see an image with gray at the top.', '/report_result?0')
 
     def test_sdl_ogl_defaultmatrixmode(self):
       # SDL, OpenGL, textures, immediate mode. Closure for more coverage
       shutil.copyfile(path_from_root('tests', 'screenshot.png'), os.path.join(self.get_dir(), 'screenshot.png'))
       self.reftest(path_from_root('tests', 'screenshot-gray-purple.png'))
-      Popen([PYTHON, EMCC, path_from_root('tests', 'sdl_ogl_defaultMatrixMode.c'), '--minify', '0', '-o', 'something.html', '--pre-js', 'reftest.js', '--preload-file', 'screenshot.png']).communicate()
+      Popen([PYTHON, EMCC, path_from_root('tests', 'sdl_ogl_defaultMatrixMode.c'), '--minify', '0', '-o', 'something.html', '--pre-js', 'reftest.js', '--preload-file', 'screenshot.png', '-s', 'GL_TESTING=1']).communicate()
       self.run_browser('something.html', 'You should see an image with gray at the top.', '/report_result?0')
 
     def test_sdl_ogl_p(self):
       # Immediate mode with pointers
       shutil.copyfile(path_from_root('tests', 'screenshot.png'), os.path.join(self.get_dir(), 'screenshot.png'))
       self.reftest(path_from_root('tests', 'screenshot-gray.png'))
-      Popen([PYTHON, EMCC, path_from_root('tests', 'sdl_ogl_p.c'), '-o', 'something.html', '--pre-js', 'reftest.js', '--preload-file', 'screenshot.png']).communicate()
+      Popen([PYTHON, EMCC, path_from_root('tests', 'sdl_ogl_p.c'), '-o', 'something.html', '--pre-js', 'reftest.js', '--preload-file', 'screenshot.png', '-s', 'GL_TESTING=1']).communicate()
       self.run_browser('something.html', 'You should see an image with gray at the top.', '/report_result?0')
 
     def test_sdl_fog_simple(self):
       # SDL, OpenGL, textures, fog, immediate mode. Closure for more coverage
       shutil.copyfile(path_from_root('tests', 'screenshot.png'), os.path.join(self.get_dir(), 'screenshot.png'))
       self.reftest(path_from_root('tests', 'screenshot-fog-simple.png'))
-      Popen([PYTHON, EMCC, path_from_root('tests', 'sdl_fog_simple.c'), '-O2', '--minify', '0', '-o', 'something.html', '--pre-js', 'reftest.js', '--preload-file', 'screenshot.png']).communicate()
+      Popen([PYTHON, EMCC, path_from_root('tests', 'sdl_fog_simple.c'), '-O2', '--minify', '0', '-o', 'something.html', '--pre-js', 'reftest.js', '--preload-file', 'screenshot.png', '-s', 'GL_TESTING=1']).communicate()
       self.run_browser('something.html', 'You should see an image with fog.', '/report_result?0')
 
     def test_sdl_fog_negative(self):
       # SDL, OpenGL, textures, fog, immediate mode. Closure for more coverage
       shutil.copyfile(path_from_root('tests', 'screenshot.png'), os.path.join(self.get_dir(), 'screenshot.png'))
       self.reftest(path_from_root('tests', 'screenshot-fog-negative.png'))
-      Popen([PYTHON, EMCC, path_from_root('tests', 'sdl_fog_negative.c'), '-o', 'something.html', '--pre-js', 'reftest.js', '--preload-file', 'screenshot.png']).communicate()
+      Popen([PYTHON, EMCC, path_from_root('tests', 'sdl_fog_negative.c'), '-o', 'something.html', '--pre-js', 'reftest.js', '--preload-file', 'screenshot.png', '-s', 'GL_TESTING=1']).communicate()
       self.run_browser('something.html', 'You should see an image with fog.', '/report_result?0')
 
     def test_sdl_fog_density(self):
       # SDL, OpenGL, textures, fog, immediate mode. Closure for more coverage
       shutil.copyfile(path_from_root('tests', 'screenshot.png'), os.path.join(self.get_dir(), 'screenshot.png'))
       self.reftest(path_from_root('tests', 'screenshot-fog-density.png'))
-      Popen([PYTHON, EMCC, path_from_root('tests', 'sdl_fog_density.c'), '-o', 'something.html', '--pre-js', 'reftest.js', '--preload-file', 'screenshot.png']).communicate()
+      Popen([PYTHON, EMCC, path_from_root('tests', 'sdl_fog_density.c'), '-o', 'something.html', '--pre-js', 'reftest.js', '--preload-file', 'screenshot.png', '-s', 'GL_TESTING=1']).communicate()
       self.run_browser('something.html', 'You should see an image with fog.', '/report_result?0')
 
     def test_sdl_fog_exp2(self):
       # SDL, OpenGL, textures, fog, immediate mode. Closure for more coverage
       shutil.copyfile(path_from_root('tests', 'screenshot.png'), os.path.join(self.get_dir(), 'screenshot.png'))
       self.reftest(path_from_root('tests', 'screenshot-fog-exp2.png'))
-      Popen([PYTHON, EMCC, path_from_root('tests', 'sdl_fog_exp2.c'), '-o', 'something.html', '--pre-js', 'reftest.js', '--preload-file', 'screenshot.png']).communicate()
+      Popen([PYTHON, EMCC, path_from_root('tests', 'sdl_fog_exp2.c'), '-o', 'something.html', '--pre-js', 'reftest.js', '--preload-file', 'screenshot.png', '-s', 'GL_TESTING=1']).communicate()
       self.run_browser('something.html', 'You should see an image with fog.', '/report_result?0')
 
     def test_sdl_fog_linear(self):
       # SDL, OpenGL, textures, fog, immediate mode. Closure for more coverage
       shutil.copyfile(path_from_root('tests', 'screenshot.png'), os.path.join(self.get_dir(), 'screenshot.png'))
       self.reftest(path_from_root('tests', 'screenshot-fog-linear.png'))
-      Popen([PYTHON, EMCC, path_from_root('tests', 'sdl_fog_linear.c'), '-o', 'something.html', '--pre-js', 'reftest.js', '--preload-file', 'screenshot.png']).communicate()
+      Popen([PYTHON, EMCC, path_from_root('tests', 'sdl_fog_linear.c'), '-o', 'something.html', '--pre-js', 'reftest.js', '--preload-file', 'screenshot.png', '-s', 'GL_TESTING=1']).communicate()
       self.run_browser('something.html', 'You should see an image with fog.', '/report_result?0')
 
     def test_worker(self):
@@ -10477,7 +10600,6 @@ elif 'browser' in str(sys.argv):
 
       def chunked_server(support_byte_ranges):
         class ChunkedServerHandler(BaseHTTPServer.BaseHTTPRequestHandler):
-          @staticmethod
           def sendheaders(s, extra=[], length=len(data)):
             s.send_response(200)
             s.send_header("Content-Length", str(length))
@@ -10491,11 +10613,14 @@ elif 'browser' in str(sys.argv):
             s.end_headers()
 
           def do_HEAD(s):
-            ChunkedServerHandler.sendheaders(s)
-            
+            s.sendheaders()
+
+          def do_OPTIONS(s):
+            s.sendheaders([("Access-Control-Allow-Headers", "Range")], 0)
+
           def do_GET(s):
             if not support_byte_ranges:
-              ChunkedServerHandler.sendheaders(s)
+              s.sendheaders()
               s.wfile.write(data)
             else:
               (start, end) = s.headers.get("range").split("=")[1].split("-")
@@ -10503,7 +10628,7 @@ elif 'browser' in str(sys.argv):
               end = int(end)
               end = min(len(data)-1, end)
               length = end-start+1
-              ChunkedServerHandler.sendheaders(s,[],length)
+              s.sendheaders([],length)
               s.wfile.write(data[start:end+1])
             s.wfile.close()
         httpd = BaseHTTPServer.HTTPServer(('localhost', 11111), ChunkedServerHandler)
@@ -10518,26 +10643,30 @@ elif 'browser' in str(sys.argv):
     def test_glgears(self):
       self.reftest(path_from_root('tests', 'gears.png'))
       Popen([PYTHON, EMCC, path_from_root('tests', 'hello_world_gles.c'), '-o', 'something.html',
-                                           '-DHAVE_BUILTIN_SINCOS', '--pre-js', 'reftest.js']).communicate()
+                                           '-DHAVE_BUILTIN_SINCOS', '--pre-js', 'reftest.js', '-s', 'GL_TESTING=1']).communicate()
       self.run_browser('something.html', 'You should see animating gears.', '/report_result?0')
 
     def test_glgears_animation(self):
-      Popen([PYTHON, EMCC, path_from_root('tests', 'hello_world_gles.c'), '-o', 'something.html',
-                                           '-DHAVE_BUILTIN_SINCOS',
-                                           '--shell-file', path_from_root('tests', 'hello_world_gles_shell.html')]).communicate()
-      self.run_browser('something.html', 'You should see animating gears.', '/report_gl_result?true')
+      for emulation in [0, 1]:
+        print emulation
+        Popen([PYTHON, EMCC, path_from_root('tests', 'hello_world_gles.c'), '-o', 'something.html',
+                                             '-DHAVE_BUILTIN_SINCOS', '-s', 'GL_TESTING=1',
+                                             '--shell-file', path_from_root('tests', 'hello_world_gles_shell.html')] +
+              (['-s', 'FORCE_GL_EMULATION=1'] if emulation else [])).communicate()
+        self.run_browser('something.html', 'You should see animating gears.', '/report_gl_result?true')
+        assert ('var GLEmulation' in open(self.in_dir('something.html')).read()) == emulation, "emulation code should be added when asked for"
 
     def test_glgears_bad(self):
       # Make sure that OpenGL ES is not available if typed arrays are not used
       Popen([PYTHON, EMCC, path_from_root('tests', 'hello_world_gles.c'), '-o', 'something.html',
-                                           '-DHAVE_BUILTIN_SINCOS',
+                                           '-DHAVE_BUILTIN_SINCOS', '-s', 'GL_TESTING=1',
                                            '-s', 'USE_TYPED_ARRAYS=0',
                                            '--shell-file', path_from_root('tests', 'hello_world_gles_shell.html')]).communicate()
       self.run_browser('something.html', 'You should not see animating gears.', '/report_gl_result?false')
 
     def test_glgears_deriv(self):
       self.reftest(path_from_root('tests', 'gears.png'))
-      Popen([PYTHON, EMCC, path_from_root('tests', 'hello_world_gles_deriv.c'), '-o', 'something.html',
+      Popen([PYTHON, EMCC, path_from_root('tests', 'hello_world_gles_deriv.c'), '-o', 'something.html', '-s', 'GL_TESTING=1',
                                            '-DHAVE_BUILTIN_SINCOS', '--pre-js', 'reftest.js']).communicate()
       self.run_browser('something.html', 'You should see animating gears.', '/report_result?0')
       src = open('something.html').read()
@@ -10568,7 +10697,7 @@ elif 'browser' in str(sys.argv):
           args = ['--preload-file', 'smoke.tga', '-O2'] # test optimizations and closure here as well for more coverage
 
         self.reftest(book_path(basename.replace('.bc', '.png')))
-        Popen([PYTHON, EMCC, program, '-o', 'program.html', '--pre-js', 'reftest.js'] + args).communicate()
+        Popen([PYTHON, EMCC, program, '-o', 'program.html', '--pre-js', 'reftest.js', '-s', 'GL_TESTING=1'] + args).communicate()
         self.run_browser('program.html', '', '/report_result?0')
 
     def btest(self, filename, expected=None, reference=None, reference_slack=0, args=[]): # TODO: use in all other tests
@@ -10581,12 +10710,37 @@ elif 'browser' in str(sys.argv):
         open(os.path.join(self.get_dir(), filename), 'w').write(self.with_report_result(src))
       else:
         expected = [str(i) for i in range(0, reference_slack+1)]
-        shutil.copyfile(path_from_root('tests', filename), os.path.join(self.get_dir(), filename))
+        shutil.copyfile(path_from_root('tests', filename), os.path.join(self.get_dir(), os.path.basename(filename)))
         self.reftest(path_from_root('tests', reference))
-        args = args + ['--pre-js', 'reftest.js']
-      Popen([PYTHON, EMCC, os.path.join(self.get_dir(), filename), '-o', 'test.html'] + args).communicate()
+        args = args + ['--pre-js', 'reftest.js', '-s', 'GL_TESTING=1']
+      Popen([PYTHON, EMCC, os.path.join(self.get_dir(), os.path.basename(filename)), '-o', 'test.html'] + args).communicate()
       if type(expected) is str: expected = [expected]
       self.run_browser('test.html', '.', ['/report_result?' + e for e in expected])
+
+    def test_gles2_emulation(self):
+      shutil.copyfile(path_from_root('tests', 'glbook', 'Chapter_10', 'MultiTexture', 'basemap.tga'), self.in_dir('basemap.tga'))
+      shutil.copyfile(path_from_root('tests', 'glbook', 'Chapter_10', 'MultiTexture', 'lightmap.tga'), self.in_dir('lightmap.tga'))
+      shutil.copyfile(path_from_root('tests', 'glbook', 'Chapter_13', 'ParticleSystem', 'smoke.tga'), self.in_dir('smoke.tga'))
+
+      for source, reference in [
+        (os.path.join('glbook', 'Chapter_2', 'Hello_Triangle', 'Hello_Triangle_orig.c'), path_from_root('tests', 'glbook', 'CH02_HelloTriangle.png')),
+        #(os.path.join('glbook', 'Chapter_8', 'Simple_VertexShader', 'Simple_VertexShader_orig.c'), path_from_root('tests', 'glbook', 'CH08_SimpleVertexShader.png')), # XXX needs INT extension in WebGL
+        (os.path.join('glbook', 'Chapter_9', 'TextureWrap', 'TextureWrap_orig.c'), path_from_root('tests', 'glbook', 'CH09_TextureWrap.png')),
+        #(os.path.join('glbook', 'Chapter_9', 'Simple_TextureCubemap', 'Simple_TextureCubemap_orig.c'), path_from_root('tests', 'glbook', 'CH09_TextureCubemap.png')), # XXX needs INT extension in WebGL
+        (os.path.join('glbook', 'Chapter_9', 'Simple_Texture2D', 'Simple_Texture2D_orig.c'), path_from_root('tests', 'glbook', 'CH09_SimpleTexture2D.png')),
+        (os.path.join('glbook', 'Chapter_10', 'MultiTexture', 'MultiTexture_orig.c'), path_from_root('tests', 'glbook', 'CH10_MultiTexture.png')),
+        (os.path.join('glbook', 'Chapter_13', 'ParticleSystem', 'ParticleSystem_orig.c'), path_from_root('tests', 'glbook', 'CH13_ParticleSystem.png')),
+      ]:
+        print source
+        self.btest(source,
+                   reference=reference,
+                   args=['-I' + path_from_root('tests', 'glbook', 'Common'),
+                         path_from_root('tests', 'glbook', 'Common', 'esUtil.c'),
+                         path_from_root('tests', 'glbook', 'Common', 'esShader.c'),
+                         path_from_root('tests', 'glbook', 'Common', 'esShapes.c'),
+                         path_from_root('tests', 'glbook', 'Common', 'esTransform.c'),
+                         '-s', 'FULL_ES2=1',
+                         '--preload-file', 'basemap.tga', '--preload-file', 'lightmap.tga', '--preload-file', 'smoke.tga'])
 
     def test_emscripten_api(self):
       self.btest('emscripten_api_browser.cpp', '1', args=['-s', '''EXPORTED_FUNCTIONS=['_main', '_third']'''])
@@ -11826,8 +11980,8 @@ fi
           if input_file not in srcs:
             srcs[input_file] = curr
           else:
-            open('/home/alon/Dev/emscripten/a', 'w').write(srcs[input_file])
-            open('/home/alon/Dev/emscripten/b', 'w').write(curr)
+            #open('/home/alon/Dev/emscripten/a', 'w').write(srcs[input_file])
+            #open('/home/alon/Dev/emscripten/b', 'w').write(curr)
             assert abs(len(curr)/float(len(srcs[input_file]))-1)<0.01, 'contents may shift in order, but must remain the same size  %d vs %d' % (len(curr), len(srcs[input_file])) + '\n' + errtail
           used_jcache = used_jcache or ('--jcache' in args)
           assert used_jcache == os.path.exists(JCache.get_cachename('emscript_files'))
