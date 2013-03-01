@@ -1820,6 +1820,8 @@ Succeeded!
         generated = open('src.cpp.o.js', 'r').read()
 
     def test_stack(self):
+        Settings.INLINING_LIMIT = 50
+
         src = '''
           #include <stdio.h>
           int test(int i) {
@@ -2470,12 +2472,15 @@ Exception execution path of first function! 1
         '''
         
         Settings.DISABLE_EXCEPTION_CATCHING = 0
+        if '-O2' in self.emcc_args:
+          self.emcc_args.pop() ; self.emcc_args.pop() # disable closure to work around a closure bug
         self.do_run(src, 'Throw...Construct...Catched...Destruct...Throw...Construct...Copy...Catched...Destruct...Destruct...')
 
     def test_white_list_exception(self):
       if Settings.ASM_JS: return self.skip('no exceptions support in asm')
       Settings.DISABLE_EXCEPTION_CATCHING = 2
       Settings.EXCEPTION_CATCHING_WHITELIST = ["__Z12somefunctionv"]
+      Settings.INLINING_LIMIT = 50 # otherwise it is inlined and not identified
 
       src = '''
           #include <stdio.h>
@@ -2508,8 +2513,6 @@ Exception execution path of first function! 1
     def test_uncaught_exception(self):
         if Settings.ASM_JS: return self.skip('no exceptions support in asm')
         if self.emcc_args is None: return self.skip('no libcxx inclusion without emcc')
-        if '-O2' in self.emcc_args:
-          self.emcc_args += ['--closure', '1'] # Use closure here for some additional coverage
 
         Settings.DISABLE_EXCEPTION_CATCHING = 0
 
@@ -2622,6 +2625,7 @@ Exiting setjmp function, level: 0, prev_jmp: -1
       if self.emcc_args is None: return self.skip('requires emcc')
       if Settings.ASM_JS: return self.skip('uses report_stack without exporting')
 
+      Settings.INLINING_LIMIT = 50
       Settings.CATCH_EXIT_CODE = 1
 
       src = r'''
@@ -3069,6 +3073,8 @@ Exiting setjmp function, level: 0, prev_jmp: -1
     def test_stack_varargs(self):
       if self.emcc_args is None: return # too slow in other modes
 
+      Settings.INLINING_LIMIT = 50
+
       # We should not blow up the stack with numerous varargs
       src = r'''
         #include <stdio.h>
@@ -3089,6 +3095,8 @@ Exiting setjmp function, level: 0, prev_jmp: -1
       self.do_run(src, 'ok!')
 
     def test_stack_void(self):
+      Settings.INLINING_LIMIT = 50
+
       src = r'''
         #include <stdio.h>
 
@@ -6952,6 +6960,7 @@ def process(filename):
       # gcc -O3 -I/home/alon/Dev/emscripten/tests/sqlite -ldl src.c
       if self.emcc_args is None: return self.skip('Very slow without ta2, and we would also need to include dlmalloc manually without emcc')
       if Settings.QUANTUM_SIZE == 1: return self.skip('TODO FIXME')
+      self.banned_js_engines = [NODE_JS] # OOM in older node
 
       Settings.CORRECT_SIGNS = 1
       Settings.CORRECT_OVERFLOWS = 0
@@ -6997,7 +7006,8 @@ def process(filename):
 
       self.do_run(open(path_from_root('tests', 'bullet', 'Demos', 'HelloWorld', 'HelloWorld.cpp'), 'r').read(),
                    [open(path_from_root('tests', 'bullet', 'output.txt'), 'r').read(), # different roundings
-                    open(path_from_root('tests', 'bullet', 'output2.txt'), 'r').read()],
+                    open(path_from_root('tests', 'bullet', 'output2.txt'), 'r').read(),
+                    open(path_from_root('tests', 'bullet', 'output3.txt'), 'r').read()],
                    libraries=self.get_library('bullet', [os.path.join('src', '.libs', 'libBulletDynamics.a'),
                                                           os.path.join('src', '.libs', 'libBulletCollision.a'),
                                                           os.path.join('src', '.libs', 'libLinearMath.a')],
@@ -8521,12 +8531,13 @@ Options that are modified or new in %s include:
               assert re.search('HEAP8\[\$?\w+ \+ \(+\$?\w+ ', generated) or re.search('HEAP8\[HEAP32\[', generated), 'eliminator should create compound expressions, and fewer one-time vars' # also in -O1, but easier to test in -O2
             assert ('_puts(' in generated) == (opt_level >= 1), 'with opt >= 1, llvm opts are run and they should optimize printf to puts'
             assert 'function _main() {' in generated, 'Should be unminified, including whitespace'
-            assert ('-O3' in (params+(bc_params or []))) or'function _dump' in generated, 'No inlining by default'
 
         # emcc -s RELOOP=1 src.cpp ==> should pass -s to emscripten.py. --typed-arrays is a convenient alias for -s USE_TYPED_ARRAYS
         for params, test, text in [
+          (['-s', 'ASM_JS=1', '-O2'], lambda generated: 'var i1 = 0' in generated, 'registerize is run by default in -O2'),
+          (['-s', 'ASM_JS=1', '-O2', '-g'], lambda generated: 'var i1 = 0' not in generated, 'registerize is cancelled by -g'),
           (['-s', 'INLINING_LIMIT=0'], lambda generated: 'function _dump' in generated, 'no inlining without opts'),
-          (['-O1', '-s', 'INLINING_LIMIT=0'], lambda generated: 'function _dump' not in generated, 'inlining'),
+          (['-O3', '-s', 'INLINING_LIMIT=0', '--closure', '0'], lambda generated: 'function _dump' not in generated, 'lto/inlining'),
           (['-s', 'USE_TYPED_ARRAYS=0'], lambda generated: 'new Int32Array' not in generated, 'disable typed arrays'),
           (['-s', 'USE_TYPED_ARRAYS=1'], lambda generated: 'IHEAPU = ' in generated, 'typed arrays 1 selected'),
           ([], lambda generated: 'Module["_dump"]' not in generated, 'dump is not exported by default'),
@@ -8656,7 +8667,7 @@ f.close()
             
             # Run through node, if CMake produced a .js file.
             if cmake_outputs[i].endswith('.js'):
-              ret = Popen([NODE_JS, tempdirname + '/' + cmake_outputs[i]], stdout=PIPE).communicate()[0]
+              ret = Popen(listify(NODE_JS) + [tempdirname + '/' + cmake_outputs[i]], stdout=PIPE).communicate()[0]
               assert 'hello, world!' in ret, 'Running cmake-based .js application failed!'
           finally:
             os.chdir(path_from_root('tests')) # Move away from the directory we are about to remove.
@@ -9463,7 +9474,7 @@ f.close()
         (path_from_root('tools', 'test-js-optimizer-asm-last.js'), open(path_from_root('tools', 'test-js-optimizer-asm-last-output.js')).read(),
          ['asm', 'last']),
       ]:
-        output = Popen([NODE_JS, path_from_root('tools', 'js-optimizer.js'), input] + passes, stdin=PIPE, stdout=PIPE).communicate()[0]
+        output = Popen(listify(NODE_JS) + [path_from_root('tools', 'js-optimizer.js'), input] + passes, stdin=PIPE, stdout=PIPE).communicate()[0]
         self.assertIdentical(expected, output.replace('\r\n', '\n').replace('\n\n', '\n'))
 
     def test_m_mm(self):
@@ -9479,8 +9490,8 @@ f.close()
       try:
         os.environ['EMCC_DEBUG'] = '1'
         for asm, linkable, chunks, js_chunks in [
-            (0, 0, 2, 2), (0, 1, 4, 4),
-            (1, 0, 2, 2), (1, 1, 4, 5)
+            (0, 0, 3, 2), (0, 1, 4, 4),
+            (1, 0, 3, 2), (1, 1, 4, 5)
           ]:
           print asm, linkable, chunks, js_chunks
           output, err = Popen([PYTHON, EMCC, path_from_root('tests', 'hello_libcxx.cpp'), '-O1', '-s', 'LINKABLE=%d' % linkable, '-s', 'ASM_JS=%d' % asm], stdout=PIPE, stderr=PIPE).communicate()
@@ -9689,25 +9700,25 @@ seeked= file.
             }
           ''')
           out, err = Popen([PYTHON, EMCC, self.in_dir('main.cpp'), '-O2', '-o', 'main.o'], stdout=PIPE, stderr=PIPE).communicate()
-          assert ("emcc: LLVM opts: ['-disable-inlining', '-O3']" in err) == optimize_normally
+          assert ("emcc: LLVM opts: ['-O3']" in err) == optimize_normally
           assert (' with -O3 since EMCC_OPTIMIZE_NORMALLY defined' in err) == optimize_normally
 
           out, err = Popen([PYTHON, EMCC, self.in_dir('supp.cpp'), '-O2', '-o', 'supp.o'], stdout=PIPE, stderr=PIPE).communicate()
-          assert ("emcc: LLVM opts: ['-disable-inlining', '-O3']" in err) == optimize_normally
+          assert ("emcc: LLVM opts: ['-O3']" in err) == optimize_normally
           assert (' with -O3 since EMCC_OPTIMIZE_NORMALLY defined' in err) == optimize_normally
 
           out, err = Popen([PYTHON, EMCC, self.in_dir('main.o'), self.in_dir('supp.o'), '-O2', '-o', 'both.o'], stdout=PIPE, stderr=PIPE).communicate()
-          assert "emcc: LLVM opts: ['-disable-inlining', '-O3']" not in err
+          assert "emcc: LLVM opts: ['-O3']" not in err
           assert ' with -O3 since EMCC_OPTIMIZE_NORMALLY defined' not in err
           assert ('despite EMCC_OPTIMIZE_NORMALLY since not source code' in err) == optimize_normally
 
           out, err = Popen([PYTHON, EMCC, self.in_dir('main.cpp'), self.in_dir('supp.cpp'), '-O2', '-o', 'both2.o'], stdout=PIPE, stderr=PIPE).communicate()
-          assert ("emcc: LLVM opts: ['-disable-inlining', '-O3']" in err) == optimize_normally
+          assert ("emcc: LLVM opts: ['-O3']" in err) == optimize_normally
           assert (' with -O3 since EMCC_OPTIMIZE_NORMALLY defined' in err) == optimize_normally
 
           for last in ['both.o', 'both2.o']:
             out, err = Popen([PYTHON, EMCC, self.in_dir('both.o'), '-O2', '-o', last + '.js'], stdout=PIPE, stderr=PIPE).communicate()
-            assert ("emcc: LLVM opts: ['-disable-inlining', '-O3']" not in err) == optimize_normally
+            assert ("emcc: LLVM opts: ['-O3']" not in err) == optimize_normally
             assert ' with -O3 since EMCC_OPTIMIZE_NORMALLY defined' not in err
             output = run_js(last + '.js')
             assert 'yello' in output, 'code works'
@@ -11930,6 +11941,8 @@ fi
 
       try:
         os.environ['EMCC_DEBUG'] = '1'
+        os.environ['EMCC_JSOPT_MIN_CHUNK_SIZE'] = str(1024*512)
+
         self.working_dir = os.path.join(TEMP_DIR, 'emscripten_temp')
         if not os.path.exists(self.working_dir): os.makedirs(self.working_dir)
 
@@ -11956,7 +11969,7 @@ fi
           (['--jcache'], 'hello_malloc.cpp', False, True, False, True, False, True, []),
           ([], 'hello_malloc.cpp', False, False, False, False, False, False, []),
           # new, huge file
-          ([], 'hello_libcxx.cpp', False, False, False, False, False, False, ('2 chunks', '3 chunks')),
+          ([], 'hello_libcxx.cpp', False, False, False, False, False, False, ('3 chunks',)),
           (['--jcache'], 'hello_libcxx.cpp', True, False, True, False, True, False, []),
           (['--jcache'], 'hello_libcxx.cpp', False, True, False, True, False, True, []),
           ([], 'hello_libcxx.cpp', False, False, False, False, False, False, []),
@@ -11989,6 +12002,7 @@ fi
 
       finally:
         del os.environ['EMCC_DEBUG']
+        del os.environ['EMCC_JSOPT_MIN_CHUNK_SIZE']
 
 else:
   raise Exception('Test runner is confused: ' + str(sys.argv))

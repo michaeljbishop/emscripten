@@ -11,7 +11,7 @@ def path_from_root(*pathelems):
 JS_OPTIMIZER = path_from_root('tools', 'js-optimizer.js')
 
 NUM_CHUNKS_PER_CORE = 1.5
-MIN_CHUNK_SIZE = 1024*1024
+MIN_CHUNK_SIZE = int(os.environ.get('EMCC_JSOPT_MIN_CHUNK_SIZE') or 1024*1024) # configuring this is just for debugging purposes
 MAX_CHUNK_SIZE = 20*1024*1024
 
 WINDOWS = sys.platform.startswith('win')
@@ -139,7 +139,7 @@ def run_on_js(filename, passes, js_engine, jcache):
 
   if len(filenames) > 0:
     # XXX Use '--nocrankshaft' to disable crankshaft to work around v8 bug 1895, needed for older v8/node (node 0.6.8+ should be ok)
-    commands = map(lambda filename: [js_engine, JS_OPTIMIZER, filename, 'noPrintMetadata'] + passes, filenames)
+    commands = map(lambda filename: js_engine + [JS_OPTIMIZER, filename, 'noPrintMetadata'] + passes, filenames)
     #print [' '.join(command) for command in commands]
 
     cores = min(cores, filenames)
