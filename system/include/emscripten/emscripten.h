@@ -204,12 +204,14 @@ void emscripten_async_wget(const char* url, const char* file, void (*onload)(con
  *               data buffer only lives during the
  *               callback, so you should use it or copy
  *               it during that time and not later.
+ *               returns true if the callback assumes
+ *               ownership of the memory.
  *
  * @param onerror An optional callback on failure, with the
  *                @arg that was provided to this function.
  *
  */
-void emscripten_async_wget_data(const char* url, void *arg, void (*onload)(void*, void*, int), void (*onerror)(void*));
+void emscripten_async_wget_data(const char* url, void *arg, int (*onload)(void*, void*, int), void (*onerror)(void*));
 
 /*
  * More feature-complete version of emscripten_async_wget. Note:

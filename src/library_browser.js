@@ -386,7 +386,13 @@ mergeInto(LibraryManager.library, {
         }
       };
       xhr.onerror = onerror;
-      xhr.send(null);
+      try {
+        xhr.send(null);
+      }
+      catch (e) {
+        console.log('Failure retrieving url: \'' + url + '\'. message: ' + e.message);
+        onerror();
+      }
     },
 
     asyncLoad: function(url, onload, onerror, noRunDep) {
@@ -467,8 +473,9 @@ mergeInto(LibraryManager.library, {
     Browser.asyncLoad(Pointer_stringify(url), function(byteArray) {
       var buffer = _malloc(byteArray.length);
       HEAPU8.set(byteArray, buffer);
-      Runtime.dynCall('viii', onload, [arg, buffer, byteArray.length]);
-      _free(buffer);
+      if (!Runtime.dynCall('iiii', onload, [arg, buffer, byteArray.length])) {
+        _free(buffer);
+      }
     }, function() {
       if (onerror) Runtime.dynCall('vi', onerror, [arg]);
     }, true /* no need for run dependency, this is async but will not do any prepare etc. step */ );
