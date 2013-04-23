@@ -2309,22 +2309,6 @@ cat |umber one top notchfi FI FO FUM WHEN WHERE WHY HOW WHO|''', ['wowie', 'too'
         '''
         self.do_run(src, 'Assertion failed: 1 == false')
 
-    def test_libcextra(self):
-        src = r'''
-          #include <stdio.h>
-          #include <wchar.h>
-
-          int main()
-          {
-              const wchar_t* wstr = L"Hello";
-
-              printf("wcslen: %d\n", wcslen(wstr));
-
-              return 0;
-          }
-        '''
-        self.do_run(src, 'wcslen: 5')
-
     def test_longjmp(self):
         src = r'''
           #include <stdio.h>
@@ -2504,6 +2488,57 @@ Exception execution path of first function! 0
 Calling longjmp the second time!
 Exception execution path of first function! 1
 ''')
+
+    def test_longjmp_funcptr(self):
+        src = r'''
+          #include <stdio.h>
+          #include <setjmp.h>
+           
+          static jmp_buf buf;
+
+          void (*fp)() = NULL;
+
+          void second(void) {
+              printf("second\n");         // prints
+              longjmp(buf,1);             // jumps back to where setjmp was called - making setjmp now return 1
+          }
+           
+          void first(void) {
+              fp();
+              printf("first\n");          // does not print
+          }
+           
+          int main(int argc, char **argv) {
+              fp = argc == 200 ? NULL : second;
+
+              volatile int x = 0;
+              if ( ! setjmp(buf) ) {
+                  x++;
+                  first();                // when executed, setjmp returns 0
+              } else {                    // when longjmp jumps back, setjmp returns 1
+                  printf("main: %d\n", x);       // prints
+              }
+           
+              return 0;
+          }
+        '''
+        self.do_run(src, 'second\nmain: 1\n')
+
+    def test_setjmp_many(self):
+      src = r'''
+        #include <stdio.h>
+        #include <setjmp.h>
+
+        int main(int argc) {
+          jmp_buf buf;
+          for (int i = 0; i < NUM; i++) printf("%d\n", setjmp(buf));
+          if (argc-- == 1131) longjmp(buf, 11);
+          return 0;
+        }
+      '''
+      for num in [Settings.MAX_SETJMPS, Settings.MAX_SETJMPS+1]:
+        print num
+        self.do_run(src.replace('NUM', str(num)), '0\n' * num if num <= Settings.MAX_SETJMPS or not Settings.ASM_JS else 'build with a higher value for MAX_SETJMPS')
 
     def test_exceptions(self):
         if Settings.QUANTUM_SIZE == 1: return self.skip("we don't support libcxx in q1")
