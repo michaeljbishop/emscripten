@@ -2309,6 +2309,23 @@ cat |umber one top notchfi FI FO FUM WHEN WHERE WHY HOW WHO|''', ['wowie', 'too'
         '''
         self.do_run(src, 'Assertion failed: 1 == false')
 
+    def test_libcextra(self):
+        if self.emcc_args is None: return self.skip('needs emcc for libcextra')
+        src = r'''
+          #include <stdio.h>
+          #include <wchar.h>
+
+          int main()
+          {
+              const wchar_t* wstr = L"Hello";
+
+              printf("wcslen: %d\n", wcslen(wstr));
+
+              return 0;
+          }
+        '''
+        self.do_run(src, 'wcslen: 5')
+
     def test_longjmp(self):
         src = r'''
           #include <stdio.h>
