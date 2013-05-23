@@ -5930,6 +5930,15 @@ LibraryManager.library = {
   },
 
   // ==========================================================================
+  // grp.h
+  // ==========================================================================
+
+  // TODO: Implement.
+  getgrgid: function() {
+    return 0; // NULL
+  },
+
+  // ==========================================================================
   // pwd.h
   // ==========================================================================
 
@@ -6899,6 +6908,14 @@ LibraryManager.library = {
   },
   pthread_cond_init: function() {},
   pthread_cond_destroy: function() {},
+  pthread_create: function() {
+    // threads not supported
+    throw 'pthread_create: TODO'
+    return 0;
+  },
+  pthread_cond_signal: function() {
+    return 0;
+  },
   pthread_cond_broadcast: function() {
     return 0;
   },
