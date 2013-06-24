@@ -1461,7 +1461,6 @@ var LibrarySDL = {
       audio.play();
     }
     audio.volume = channelInfo.volume;
-    audio.paused = false;
     return channel;
   },
   Mix_PlayChannelTimed: 'Mix_PlayChannel', // XXX ignore Timing
@@ -1577,7 +1576,6 @@ var LibrarySDL = {
     var info = SDL.channels[channel];
     if (info && info.audio) {
       info.audio.pause();
-      info.audio.paused = true;
     }
   },
   
