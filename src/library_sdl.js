@@ -1451,7 +1451,7 @@ var LibrarySDL = {
   Mix_LoadWAV_RW: function(rwopsID, freesrc) {
     var rwops = SDL.rwops[rwopsID];
 
-    if (rwops === undefined)
+    if ( rwops === undefined )
       return 0;
 
     var filename = '';
@@ -1471,7 +1471,7 @@ var LibrarySDL = {
         if (fileObject === null) Module.printErr('Couldn\'t find file for: ' + filename);
         
         // We found the file. Load the contents
-        if (fileObject && !fileObject.isFolder && fileObject.read) {
+        if ( fileObject && !fileObject.isFolder && fileObject.read ) {
           bytes = fileObject.contents
         } else {
           return 0;
