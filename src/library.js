@@ -561,12 +561,12 @@ LibraryManager.library = {
       var utf8 = new Runtime.UTF8Processor();
       function createSimpleOutput() {
         var fn = function (val) {
-          if (val === null || val === {{{ charCode('\n') }}}) {
+        if (val === null || val === {{{ charCode('\n') }}}) {
             fn.printer(fn.buffer.join(''));
             fn.buffer = [];
-          } else {
+        } else {
             fn.buffer.push(utf8.processCChar(val));
-          }
+        }
         };
         return fn;
       }
@@ -1065,13 +1065,13 @@ LibraryManager.library = {
     }
     path = FS.analyzePath(path);
     var properties = { contents: [], isFolder: false };  // S_IFDIR.
-    try {
-      FS.createObject(path.parentObject, path.name, properties,
-                      mode & 0x100, mode & 0x80);  // S_IRUSR, S_IWUSR.
-      return 0;
-    } catch (e) {
-      return -1;
-    }
+      try {
+        FS.createObject(path.parentObject, path.name, properties,
+                        mode & 0x100, mode & 0x80);  // S_IRUSR, S_IWUSR.
+        return 0;
+      } catch (e) {
+        return -1;
+      }
   },
   mkdir__deps: ['mknod'],
   mkdir: function(path, mode) {
@@ -6598,7 +6598,7 @@ LibraryManager.library = {
 
     var bytes = intArrayFromString(pattern, false);
     if (bytes.length > maxsize) {
-      return 0;
+    return 0;
     } 
 
     writeArrayToMemory(bytes, s);
