@@ -477,6 +477,32 @@ var LibrarySDL = {
             }
           }
           break;
+        case 'touchstart':
+          SDL.DOMButtons[0] = 1;
+          SDL.events.push({
+            type: 'mousedown',
+            button: 0,
+            pageX: event.changedTouches[0].pageX,
+            pageY: event.changedTouches[0].pageY
+          });
+          break;
+        case 'touchend':
+          SDL.DOMButtons[0] = 0;
+          SDL.events.push({
+            type: 'mouseup',
+            button: 0,
+            pageX: event.changedTouches[0].pageX,
+            pageY: event.changedTouches[0].pageY
+          });
+          break;
+        case 'touchmove':
+          SDL.events.push({
+            type: 'mousemove',
+            button: 0,
+            pageX: event.changedTouches[0].pageX,
+            pageY: event.changedTouches[0].pageY
+          });
+          break;
         case 'blur':
         case 'visibilitychange': {
           // Un-press all pressed keys: TODO
@@ -754,7 +780,8 @@ var LibrarySDL = {
   },
 
   SDL_SetVideoMode: function(width, height, depth, flags) {
-    ['mousedown', 'mouseup', 'mousemove', 'DOMMouseScroll', 'mousewheel', 'mouseout'].forEach(function(event) {
+    ['mousedown', 'mouseup', 'mousemove', 'DOMMouseScroll', 'mousewheel', 'mouseout',
+     'touchstart', 'touchend', 'touchmove'].forEach(function(event) {
       Module['canvas'].addEventListener(event, SDL.receiveEvent, true);
     });
     Browser.setCanvasSize(width, height, true);
@@ -1430,7 +1457,6 @@ var LibrarySDL = {
       var raw = Module["preloadedAudios"][filename];
       if (!raw) {
         if (raw === null) Module.printErr('Trying to reuse preloaded audio, but freePreloadedMediaOnUse is set!');
-        Runtime.warnOnce('Cannot find preloaded audio ' + filename);
         
         // see if we can read the file-contents from the in-memory FS
         var fileObject = FS.findObject(filename);
@@ -1442,6 +1468,7 @@ var LibrarySDL = {
           bytes = fileObject.contents
         }
         else {
+          Runtime.warnOnce('Cannot find preloaded audio ' + filename);
           return 0;
         }
       }
