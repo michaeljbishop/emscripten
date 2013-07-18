@@ -9,7 +9,7 @@ header files (so that the JS compiler can see the constants in those
 headers, for the libc implementation in JS).
 '''
 
-import os, sys, json, optparse, subprocess, re, time, multiprocessing, functools
+import os, sys, json, optparse, subprocess, re, time, multiprocessing, string
 
 from tools import shared
 from tools import jsrun, cache as cache_module, tempfiles
@@ -44,20 +44,25 @@ MIN_CHUNK_SIZE = 1024*1024
 MAX_CHUNK_SIZE = float(os.environ.get('EMSCRIPT_MAX_CHUNK_SIZE') or 'inf') # configuring this is just for debugging purposes
 
 def process_funcs((i, funcs, meta, settings_file, compiler, forwarded_file, libraries, compiler_engine, temp_files, DEBUG)):
-  funcs_file = temp_files.get('.func_%d.ll' % i).name
-  f = open(funcs_file, 'w')
-  f.write(funcs)
-  funcs = None
-  f.write('\n')
-  f.write(meta)
-  f.close()
-  out = jsrun.run_js(
-    compiler,
-    engine=compiler_engine,
-    args=[settings_file, funcs_file, 'funcs', forwarded_file] + libraries,
-    stdout=subprocess.PIPE,
-    cwd=path_from_root('src'))
-  tempfiles.try_delete(funcs_file)
+  try:
+    funcs_file = temp_files.get('.func_%d.ll' % i).name
+    f = open(funcs_file, 'w')
+    f.write(funcs)
+    funcs = None
+    f.write('\n')
+    f.write(meta)
+    f.close()
+    out = jsrun.run_js(
+      compiler,
+      engine=compiler_engine,
+      args=[settings_file, funcs_file, 'funcs', forwarded_file] + libraries,
+      stdout=subprocess.PIPE,
+      cwd=path_from_root('src'))
+  except KeyboardInterrupt:
+    # Python 2.7 seems to lock up when a child process throws KeyboardInterrupt
+    raise Exception()
+  finally:
+    tempfiles.try_delete(funcs_file)
   if DEBUG: print >> sys.stderr, '.'
   return out
 
@@ -619,6 +624,18 @@ Runtime.stackRestore = function(top) { asm['stackRestore'](top) };
 '''] + funcs_js + ['''
 // EMSCRIPTEN_END_FUNCS
 ''']
+
+  # Create symbol table for self-dlopen
+  if settings.get('DLOPEN_SUPPORT'):
+    symbol_table = { k:v+forwarded_json['Runtime']['GLOBAL_BASE']
+      for k,v in forwarded_json['Variables']['indexedGlobals'].iteritems()
+      if forwarded_json['Variables']['globals'][k]['named'] }
+    for raw in last_forwarded_json['Functions']['tables'].itervalues():
+      if raw == '': continue
+      table = map(string.strip, raw[raw.find('[')+1:raw.find(']')].split(","))
+      symbol_table.update(map(lambda x: (x[1], x[0]),
+        filter(lambda x: x[1] != '0', enumerate(table))))
+    outfile.write("var SYMBOL_TABLE = %s;" % json.dumps(symbol_table))
 
   for funcs_js_item in funcs_js: # do this loop carefully to save memory
     funcs_js_item = indexize(funcs_js_item)

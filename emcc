@@ -1077,6 +1077,9 @@ try:
     shared.Settings.LINKABLE = 1 # TODO: add FORCE_DCE option for the brave people that do want to dce here and in side modules
     debug_level = max(debug_level, 2)
 
+  if shared.Settings.DLOPEN_SUPPORT:
+    shared.Settings.LINKABLE = 1
+
   ## Compile source code to bitcode
 
   logging.debug('compiling to bitcode')
@@ -1535,14 +1538,17 @@ try:
 
   # It is useful to run several js optimizer passes together, to save on unneeded unparsing/reparsing
   js_optimizer_queue = []
+  js_optimizer_extra_info = {}
   def flush_js_optimizer_queue():
-    global final, js_optimizer_queue
+    global final, js_optimizer_queue, js_optimizer_extra_info
+    if len(js_optimizer_extra_info) == 0:
+      js_optimizer_extra_info = None
     if len(js_optimizer_queue) > 0 and not(len(js_optimizer_queue) == 1 and js_optimizer_queue[0] == 'last'):
       if DEBUG != '2':
         if shared.Settings.ASM_JS:
           js_optimizer_queue = ['asm'] + js_optimizer_queue
         logging.debug('applying js optimization passes: %s', js_optimizer_queue)
-        final = shared.Building.js_optimizer(final, js_optimizer_queue, jcache, debug_level >= 4)
+        final = shared.Building.js_optimizer(final, js_optimizer_queue, jcache, debug_level >= 4, js_optimizer_extra_info)
         js_transform_tempfiles.append(final)
         if DEBUG: save_intermediate('js_opts')
       else:
@@ -1551,10 +1557,11 @@ try:
           if shared.Settings.ASM_JS:
             passes = ['asm'] + passes
           logging.debug('applying js optimization pass: %s', passes)
-          final = shared.Building.js_optimizer(final, passes, jcache, debug_level >= 4)
+          final = shared.Building.js_optimizer(final, passes, jcache, debug_level >= 4, js_optimizer_extra_info)
           js_transform_tempfiles.append(final)
           save_intermediate(name)
       js_optimizer_queue = []
+    js_optimizer_extra_info = {}
 
   if opt_level >= 1:
     logging.debug('running pre-closure post-opts')
@@ -1571,7 +1578,7 @@ try:
       else:
         return 'eliminate'
 
-    js_optimizer_queue += [get_eliminate(), 'simplifyExpressionsPre']
+    js_optimizer_queue += [get_eliminate(), 'simplifyExpressions']
 
     if shared.Settings.RELOOP and not shared.Settings.ASM_JS:
       js_optimizer_queue += ['optimizeShiftsAggressive', get_eliminate()] # aggressive shifts optimization requires loops, it breaks on switches
@@ -1585,9 +1592,9 @@ try:
     final = shared.Building.closure_compiler(final)
     if DEBUG: save_intermediate('closure')
 
-  if opt_level >= 1:
-    logging.debug('running post-closure post-opts')
-    js_optimizer_queue += ['simplifyExpressionsPost']
+  if shared.Settings.OUTLINING_LIMIT > 0:
+    js_optimizer_queue += ['outline']
+    js_optimizer_extra_info['sizeToOutline'] = shared.Settings.OUTLINING_LIMIT
 
   if (not closure or shared.Settings.ASM_JS) and shared.Settings.RELOOP and debug_level < 3:
     js_optimizer_queue += ['registerize']

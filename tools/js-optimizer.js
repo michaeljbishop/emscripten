@@ -410,7 +410,7 @@ function removeUnneededLabelSettings(ast) {
 var USEFUL_BINARY_OPS = set('<<', '>>', '|', '&', '^');
 var COMPARE_OPS = set('<', '<=', '>', '>=', '==', '===', '!=', '!==');
 
-function simplifyExpressionsPre(ast) {
+function simplifyExpressions(ast) {
   // Simplify common expressions used to perform integer conversion operations
   // in cases where no conversion is needed.
   function simplifyIntegerConversions(ast) {
@@ -793,6 +793,7 @@ function simplifyExpressionsPre(ast) {
     joinAdditions(func);
     // simplifyZeroComp(func); TODO: investigate performance
     if (asm) asmOpts(func);
+    simplifyNotComps(func);
   });
 }
 
@@ -1156,10 +1157,6 @@ function simplifyNotComps(ast) {
   simplifyNotCompsPass = true;
   traverse(ast, simplifyNotCompsDirect);
   simplifyNotCompsPass = false;
-}
-
-function simplifyExpressionsPost(ast) {
-  simplifyNotComps(ast);
 }
 
 var NO_SIDE_EFFECTS = set('num', 'name');
@@ -1540,24 +1537,22 @@ function detectAsmCoercion(node, asmInfo) {
   // for params, +x vs x|0, for vars, 0.0 vs 0
   if (node[0] === 'num' && node[1].toString().indexOf('.') >= 0) return ASM_DOUBLE;
   if (node[0] === 'unary-prefix') return ASM_DOUBLE;
-  if (asmInfo && node[0] == 'name') {
-    if (node[1] in asmInfo.vars) return asmInfo.vars[node[1]];
-    if (node[1] in asmInfo.params) return asmInfo.params[node[1]];
-  }
+  if (asmInfo && node[0] == 'name') return getAsmType(node[1], asmInfo);
   return ASM_INT;
 }
 
-function makeAsmParamCoercion(param, type) {
-  return type === ASM_INT ? ['binary', '|', ['name', param], ['num', 0]] : ['unary-prefix', '+', ['name', param]];
+function makeAsmCoercion(node, type) {
+  return type === ASM_INT ? ['binary', '|', node, ['num', 0]] : ['unary-prefix', '+', node];
 }
 
 function makeAsmVarDef(v, type) {
   return [v, type === ASM_INT ? ['num', 0] : ['unary-prefix', '+', ['num', 0]]];
 }
 
-function getAsmType(asmInfo, name) {
+function getAsmType(name, asmInfo) {
   if (name in asmInfo.vars) return asmInfo.vars[name];
-  return asmInfo.params[name];
+  if (name in asmInfo.params) return asmInfo.params[name];
+  assert(false, 'unknown var ' + name);
 }
 
 function normalizeAsm(func) {
@@ -1658,7 +1653,7 @@ function denormalizeAsm(func, data) {
   // add param coercions
   var next = 0;
   func[2].forEach(function(param) {
-    stats[next++] = ['stat', ['assign', true, ['name', param], makeAsmParamCoercion(param, data.params[param])]];
+    stats[next++] = ['stat', ['assign', true, ['name', param], makeAsmCoercion(['name', param], data.params[param])]];
   });
   // add variable definitions
   var varDefs = [];
@@ -1671,6 +1666,37 @@ function denormalizeAsm(func, data) {
     stats[next] = emptyNode();
   }
   //printErr('denormalized \n\n' + astToSrc(func) + '\n\n');
+}
+
+function getFirstIndexInNormalized(func, data) {
+  // In a normalized asm function, return the index of the first element that is not not defs or annotation
+  var stats = func[3];
+  var i = stats.length-1;
+  while (i >= 0) {
+    var stat = stats[i];
+    if (stat[0] == 'var') break;
+    i--;
+  }
+  return i+1;
+}
+
+function getStackBumpNode(ast) {
+  var found = null;
+  traverse(ast, function(node, type) {
+    if (type === 'assign' && node[2][0] === 'name' && node[2][1] === 'STACKTOP') {
+      var value = node[3];
+      if (value[0] === 'name') return true;
+      assert(value[0] == 'binary' && value[1] == '|' && value[2][0] == 'binary' && value[2][1] == '+' && value[2][2][0] == 'name' && value[2][2][1] == 'STACKTOP' && value[2][3][0] == 'num');
+      found = node;
+      return true;
+    }
+  });
+  return found;
+}
+
+function getStackBumpSize(ast) {
+  var node = getStackBumpNode(ast);
+  return node ? node[3][2][3][1] : 0;
 }
 
 // Very simple 'registerization', coalescing of variables into a smaller number,
@@ -2981,23 +3007,24 @@ function outline(ast) {
       stack.push(name);
     }
     asmData.stackPos = {};
+    var stackSize = getStackBumpSize(func);
     for (var i = 0; i < stack.length; i++) {
-      asmData.stackPos[stack[i]] = i*8;
+      asmData.stackPos[stack[i]] = stackSize + i*8;
     }
     // Reserve an extra two spots: one for control flow var, the other for control flow data
-    asmData.stackSize = (stack.length + 2)*8;
-    asmData.controlStackPos = asmData.stackSize - 16;
-    asmData.controlDataStackPos = asmData.stackSize - 8;
+    asmData.extraStackSize = (stack.length + 2)*8;
+    asmData.controlStackPos = stackSize + asmData.extraStackSize - 16;
+    asmData.controlDataStackPos = stackSize + asmData.extraStackSize - 8;
     asmData.splitCounter = 0;
   }
 
   // Analyze uses - reads and writes - of variables in part of the AST of a function
   function analyzeCode(func, asmData, ast) {
-    var labels = {};
+    var labels = {}; // labels defined in this code
     var labelCounter = 1; // 0 means no label
 
     traverse(ast, function(node, type) {
-      if ((type == 'label' || type in LOOP_FLOW) && node[1] && !(node[1] in labels)) {
+      if (type == 'label' && !(node[1] in labels)) {
         labels[node[1]] = labelCounter++;
       }
     });
@@ -3006,7 +3033,7 @@ function outline(ast) {
     var appearances = {};
     var hasReturn = false, hasBreak = false, hasContinue = false;
     var breaks = {};    // set of labels we break or continue
-    var continues = {}; // to. '0' is an unlabeled one
+    var continues = {}; // to (name -> id, just like labels)
     var breakCapturers = 0;
     var continueCapturers = 0;
 
@@ -3028,13 +3055,13 @@ function outline(ast) {
         var label = node[1] || 0;
         if (!label && breakCapturers > 0) return; // no label, and captured
         if (label && (label in labels)) return; // label, and defined in this code, so captured
-        breaks[label || 0] = 0;
+        if (label) breaks[label] = labelCounter++;
         hasBreak = true;
       } else if (type == 'continue') {
         var label = node[1] || 0;
         if (!label && continueCapturers > 0) return; // no label, and captured
         if (label && (label in labels)) return; // label, and defined in this code, so captured
-        continues[label || 0] = 0;
+        if (label) continues[label] = labelCounter++;
         hasContinue = true;
       } else {
         if (type in BREAK_CAPTURERS) {
@@ -3058,8 +3085,7 @@ function outline(ast) {
     for (var name in appearances) {
       if (appearances[name] > 0) reads[name] = 0;
     }
-
-    return { writes: writes, reads: reads, hasReturn: hasReturn, breaks: breaks, continues: continues, labels: labels };
+    return { writes: writes, reads: reads, hasReturn: hasReturn, hasBreak: hasBreak, hasContinue: hasContinue, breaks: breaks, continues: continues, labels: labels };
   }
 
   function makeAssign(dst, src) {
@@ -3076,6 +3102,9 @@ function outline(ast) {
   function makeComparison(left, comp, right) {
     return ['binary', comp, left, right];
   }
+  function makeSwitch(value, cases) {
+    return ['switch', value, cases];
+  }
 
   var CONTROL_BREAK = 1, CONTROL_BREAK_LABEL = 2, CONTROL_CONTINUE = 3, CONTROL_CONTINUE_LABEL = 4, CONTROL_RETURN_VOID = 5, CONTROL_RETURN_INT = 6, CONTROL_RETURN_DOUBLE = 7;
 
@@ -3091,61 +3120,68 @@ function outline(ast) {
     var reps = [];
     for (var v in codeInfo.reads) {
       if (v != 'sp') {
-        reps.push(['stat', ['assign', true, ['sub', ['name', getAsmType(asmData, v) == ASM_INT ? 'HEAP32' : 'HEAPF32'], ['binary', '>>', ['binary', '+', ['name', 'sp'], ['num', asmData.stackPos[v]]], ['num', '2']]], ['name', v]]]);
-        code.unshift(['stat', ['assign', true, ['name', v], ['sub', ['name', getAsmType(asmData, v) == ASM_INT ? 'HEAP32' : 'HEAPF32'], ['binary', '>>', ['binary', '+', ['name', 'sp'], ['num', asmData.stackPos[v]]], ['num', '2']]]]]);
+        reps.push(['stat', ['assign', true, ['sub', ['name', getAsmType(v, asmData) == ASM_INT ? 'HEAP32' : 'HEAPF32'], ['binary', '>>', ['binary', '+', ['name', 'sp'], ['num', asmData.stackPos[v]]], ['num', '2']]], ['name', v]]]);
       }
     }
     reps.push(['stat', ['call', ['name', newIdent], [['name', 'sp']]]]);
     for (var v in codeInfo.writes) {
-      reps.push(['stat', ['assign', true, ['name', v], ['sub', ['name', getAsmType(asmData, v) == ASM_INT ? 'HEAP32' : 'HEAPF32'], ['binary', '>>', ['binary', '+', ['name', 'sp'], ['num', asmData.stackPos[v]]], ['num', '2']]]]]);
-      code.push(['stat', ['assign', true, ['sub', ['name', getAsmType(asmData, v) == ASM_INT ? 'HEAP32' : 'HEAPF32'], ['binary', '>>', ['binary', '+', ['name', 'sp'], ['num', asmData.stackPos[v]]], ['num', '2']]], ['name', v]]]);
+      reps.push(['stat', ['assign', true, ['name', v], makeAsmCoercion(['sub', ['name', getAsmType(v, asmData) == ASM_INT ? 'HEAP32' : 'HEAPF32'], ['binary', '>>', ['binary', '+', ['name', 'sp'], ['num', asmData.stackPos[v]]], ['num', '2']]], getAsmType(v, asmData))]]);
     }
     // Generate new function
     if (codeInfo.hasReturn || codeInfo.hasBreak || codeInfo.hasContinue) {
       // we need to capture all control flow using a top-level labeled one-time loop in the outlined function
-      code = [['label', 'OL', ['do', ['num', 0], ['block', code]]]];
       var breakCapturers = 0;
       var continueCapturers = 0;
-      traverse(code, function(node, type) {
+      traverse(['block', code], function(node, type) { // traverse on dummy block, so we get the toplevel statements
         // replace all break/continue/returns with code to break out of the main one-time loop, and set the control data
-        if (type == 'return') {
-          var ret = ['break', 'OL'];
-          if (!node[1]) {
-            ret = ['seq', makeAssign(makeStackAccess(ASM_INT, asmData.controlStackPos), ['num', CONTROL_RETURN_VOID]), ret];
-          } else {
-            var type = detectAsmCoercion(node[1], asmData);
-            ret = ['seq', makeAssign(makeStackAccess(ASM_INT, asmData.controlStackPos), ['num', type == ASM_INT ? CONTROL_RETURN_INT : CONTROL_RETURN_DOUBLE]), ret];
-            ret = ['seq', makeAssign(makeStackAccess(type, asmData.controlDataStackPos), node[1]), ret];
-          }
-          return ret;
-        } else if (type == 'break') {
-          var label = node[1] || 0;
-          if (label == 'OL') return; // this was just added before us, it is new replacement code
-          if (!label && breakCapturers > 0) return; // no label, and captured
-          if (label && (label in codeInfo.labels)) return; // label, and defined in this code, so captured
-          var ret = ['break', 'OL'];
-          ret = ['seq', makeAssign(makeStackAccess(ASM_INT, asmData.controlStackPos), ['num', label ? CONTROL_BREAK_LABEL : CONTROL_BREAK]), ret];
-          if (label) {
-            assert(label in codeInfo.labels, label + ' in ' + keys(codeInfo.labels));
-            ret = ['seq', makeAssign(makeStackAccess(ASM_INT, asmData.controlDataStackPos), ['num', codeInfo.labels[label]]), ret];
-          }
-          return ret;
-        } else if (type == 'continue') {
-          var label = node[1] || 0;
-          if (!label && continueCapturers > 0) return; // no label, and captured
-          if (label && (label in codeInfo.labels)) return; // label, and defined in this code, so captured
-          var ret = ['break', 'OL'];
-          ret = ['seq', makeAssign(makeStackAccess(ASM_INT, asmData.controlStackPos), ['num', label ? CONTROL_CONTINUE_LABEL : CONTROL_CONTINUE]), ret];
-          if (label) {
-            ret = ['seq', makeAssign(makeStackAccess(ASM_INT, asmData.controlDataStackPos), ['num', codeInfo.labels[label]]), ret];
-          }
-          return ret;
-        } else {
-          if (type in BREAK_CAPTURERS) {
-            breakCapturers++;
-          }
-          if (type in CONTINUE_CAPTURERS) {
-            continueCapturers++;
+        if (type in BREAK_CAPTURERS) {
+          breakCapturers++;
+        }
+        if (type in CONTINUE_CAPTURERS) {
+          continueCapturers++;
+        }
+        var stats = node === code ? node : getStatements(node);
+        if (stats) {
+          for (var i = 0; i < stats.length; i++) {
+            var node = stats[i]; // step all over node and type here, for convenience
+            var type = node[0];
+            var ret = null;
+            if (type == 'return') {
+              ret = [];
+              if (!node[1]) {
+                ret.push(['stat', makeAssign(makeStackAccess(ASM_INT, asmData.controlStackPos), ['num', CONTROL_RETURN_VOID])]);
+              } else {
+                var type = detectAsmCoercion(node[1], asmData);
+                ret.push(['stat', makeAssign(makeStackAccess(ASM_INT, asmData.controlStackPos), ['num', type == ASM_INT ? CONTROL_RETURN_INT : CONTROL_RETURN_DOUBLE])]);
+                ret.push(['stat', makeAssign(makeStackAccess(type, asmData.controlDataStackPos), node[1])]);
+              }
+              ret.push(['stat', ['break', 'OL']]);
+            } else if (type == 'break') {
+              var label = node[1] || 0;
+              if (label == 'OL') continue; // this was just added before us, it is new replacement code
+              if (!label && breakCapturers > 0) continue; // no label, and captured
+              if (label && (label in codeInfo.labels)) continue; // label, and defined in this code, so captured
+              ret = [['stat', makeAssign(makeStackAccess(ASM_INT, asmData.controlStackPos), ['num', label ? CONTROL_BREAK_LABEL : CONTROL_BREAK])]];
+              if (label) {
+                assert(label in codeInfo.breaks);
+                ret.push(['stat', makeAssign(makeStackAccess(ASM_INT, asmData.controlDataStackPos), ['num', codeInfo.breaks[label]])]);
+              }
+              ret.push(['stat', ['break', 'OL']]);
+            } else if (type == 'continue') {
+              var label = node[1] || 0;
+              if (!label && continueCapturers > 0) continue; // no label, and captured
+              if (label && (label in codeInfo.labels)) continue; // label, and defined in this code, so captured
+              ret = [['stat', makeAssign(makeStackAccess(ASM_INT, asmData.controlStackPos), ['num', label ? CONTROL_CONTINUE_LABEL : CONTROL_CONTINUE])]];
+              if (label) {
+                assert(label in codeInfo.continues);
+                ret.push(['stat', makeAssign(makeStackAccess(ASM_INT, asmData.controlDataStackPos), ['num', codeInfo.continues[label]])]);
+              }
+              ret.push(['stat', ['break', 'OL']]);
+            }
+            if (ret) {
+              stats.splice.apply(stats, [i, 1].concat(ret));
+              i += ret.length-1;
+            }
           }
         }
       }, function(node, type) {
@@ -3156,49 +3192,71 @@ function outline(ast) {
           continueCapturers--;
         }
       });
+      code = [['label', 'OL', ['do', ['num', 0], ['block', code]]]]; // do this after processing, to not confuse breakCapturers etc.
       // read the control data at the callsite to the outlined function
       if (codeInfo.hasReturn) {
         reps.push(makeIf(
-          makeComparison(makeStackAccess(ASM_INT, asmData.controlStackPos), '==', ['num', CONTROL_RETURN_VOID]),
+          makeComparison(makeAsmCoercion(makeStackAccess(ASM_INT, asmData.controlStackPos), ASM_INT), '==', ['num', CONTROL_RETURN_VOID]),
           [['stat', ['return']]]
         ));
         reps.push(makeIf(
-          makeComparison(makeStackAccess(ASM_INT, asmData.controlStackPos), '==', ['num', CONTROL_RETURN_INT]),
+          makeComparison(makeAsmCoercion(makeStackAccess(ASM_INT, asmData.controlStackPos), ASM_INT), '==', ['num', CONTROL_RETURN_INT]),
           [['stat', ['return', makeStackAccess(ASM_INT, asmData.controlDataStackPos)]]]
         ));
         reps.push(makeIf(
-          makeComparison(makeStackAccess(ASM_INT, asmData.controlStackPos), '==', ['num', CONTROL_RETURN_DOUBLE]),
+          makeComparison(makeAsmCoercion(makeStackAccess(ASM_INT, asmData.controlStackPos), ASM_INT), '==', ['num', CONTROL_RETURN_DOUBLE]),
           [['stat', ['return', makeStackAccess(ASM_DOUBLE, asmData.controlDataStackPos)]]]
         ));
       }
       if (codeInfo.hasBreak) {
         reps.push(makeIf(
-          makeComparison(makeStackAccess(ASM_INT, asmData.controlStackPos), '==', ['num', CONTROL_BREAK]),
-          ['stat', ['break']]
+          makeComparison(makeAsmCoercion(makeStackAccess(ASM_INT, asmData.controlStackPos), ASM_INT), '==', ['num', CONTROL_BREAK]),
+          [['stat', ['break']]]
         ));
-        reps.push(makeIf(
-          makeComparison(makeStackAccess(ASM_INT, asmData.controlStackPos), '==', ['num', CONTROL_BREAK_LABEL]),
-          ['stat', ['break', makeStackAccess(ASM_INT, asmData.controlDataStackPos)]] // XXX here and below, need a switch overall possible labels
-        ));
+        if (keys(codeInfo.breaks).length > 0) {
+          reps.push(makeIf(
+            makeComparison(makeAsmCoercion(makeStackAccess(ASM_INT, asmData.controlStackPos), ASM_INT), '==', ['num', CONTROL_BREAK_LABEL]),
+            [makeSwitch(makeAsmCoercion(makeStackAccess(ASM_INT, asmData.controlDataStackPos), ASM_INT), keys(codeInfo.breaks).map(function(key) {
+              var id = codeInfo.breaks[key];
+              return [['num', id], [['stat', ['break', key]]]];
+            }))]
+          ));
+        }
       }
       if (codeInfo.hasContinue) {
         reps.push(makeIf(
-          makeComparison(makeStackAccess(ASM_INT, asmData.controlStackPos), '==', ['num', CONTROL_CONTINUE]),
-          ['stat', ['break']]
+          makeComparison(makeAsmCoercion(makeStackAccess(ASM_INT, asmData.controlStackPos), ASM_INT), '==', ['num', CONTROL_CONTINUE]),
+          [['stat', ['continue']]]
         ));
-        reps.push(makeIf(
-          makeComparison(makeStackAccess(ASM_INT, asmData.controlStackPos), '==', ['num', CONTROL_CONTINUE_LABEL]),
-          ['stat', ['continue', makeStackAccess(ASM_INT, asmData.controlDataStackPos)]] // XXX
-        ));
+        if (keys(codeInfo.continues).length > 0) {
+          reps.push(makeIf(
+            makeComparison(makeAsmCoercion(makeStackAccess(ASM_INT, asmData.controlStackPos), ASM_INT), '==', ['num', CONTROL_CONTINUE_LABEL]),
+            [makeSwitch(makeAsmCoercion(makeStackAccess(ASM_INT, asmData.controlDataStackPos), ASM_INT), keys(codeInfo.continues).map(function(key) {
+              var id = codeInfo.continues[key];
+              return [['num', id], [['stat', ['continue', key]]]];
+            }))]
+          ));
+        }
       }
     }
+    // add spills and unspills in outlined code outside the OL loop
+    for (var v in codeInfo.reads) {
+      if (v != 'sp') {
+        code.unshift(['stat', ['assign', true, ['name', v], makeAsmCoercion(['sub', ['name', getAsmType(v, asmData) == ASM_INT ? 'HEAP32' : 'HEAPF32'], ['binary', '>>', ['binary', '+', ['name', 'sp'], ['num', asmData.stackPos[v]]], ['num', '2']]], getAsmType(v, asmData))]]);
+      }
+    }
+    for (var v in codeInfo.writes) {
+      code.push(['stat', ['assign', true, ['sub', ['name', getAsmType(v, asmData) == ASM_INT ? 'HEAP32' : 'HEAPF32'], ['binary', '>>', ['binary', '+', ['name', 'sp'], ['num', asmData.stackPos[v]]], ['num', '2']]], ['name', v]]]);
+    }
+    // finalize
     var newFunc = ['defun', newIdent, ['sp'], code];
     var newAsmData = { params: { sp: ASM_INT }, vars: {} };
     for (var v in codeInfo.reads) {
-      newAsmData.vars[v] = getAsmType(asmData, v);
+      if (v != 'sp') newAsmData.vars[v] = getAsmType(v, asmData);
     }
     for (var v in codeInfo.writes) {
-      newAsmData.vars[v] = getAsmType(asmData, v);
+      assert(v != 'sp');
+      newAsmData.vars[v] = getAsmType(v, asmData);
     }
     denormalizeAsm(newFunc, newAsmData);
     // replace in stats
@@ -3213,7 +3271,8 @@ function outline(ast) {
     var sizeSeen = 0;
     var end = stats.length-1;
     var i = stats.length;
-    while (--i >= 0) {
+    var minIndex = stats == getStatements(func) ? getFirstIndexInNormalized(func, asmData) : 0;
+    while (--i >= minIndex) {
       var stat = stats[i];
       var size = measureSize(stat);
       //printErr(level + ' size          ' + [i, size]);
@@ -3276,20 +3335,58 @@ function outline(ast) {
       if (size >= sizeToOutline) {
         aggressiveVariableElimination(func, asmData);
         analyzeFunction(func, asmData);
-        var ret = outlineStatements(func, asmData, getStatements(func), 0.5*size);
-        if (ret && ret.length > 0) newFuncs.push.apply(newFuncs, ret);
+        var stats = getStatements(func);
+        var ret = outlineStatements(func, asmData, stats, 0.5*size);
+        if (ret && ret.length > 0) {
+          newFuncs.push.apply(newFuncs, ret);
+          // We have outlined. Add stack support
+          var extraSpace = asmData.extraStackSize;
+          if ('sp' in asmData.vars) {
+            // find stack bump (STACKTOP = STACKTOP + X | 0) and add the extra space
+            var stackBumpNode = getStackBumpNode(stats);
+            if (stackBumpNode) stackBumpNode[3][2][3][1] += extraSpace;
+          } else if (!('sp' in asmData.params)) { // if sp is a param, then we are an outlined function, no need to add stack support for us
+            // add sp variable and stack bump
+            var index = getFirstIndexInNormalized(func, asmData);
+            stats.splice(index, 0,
+              ['stat', makeAssign(['name', 'sp'], ['name', 'STACKTOP'])],
+              ['stat', makeAssign(['name', 'STACKTOP'], ['binary', '|', ['binary', '+', ['name', 'STACKTOP'], ['num', extraSpace]], ['num', 0]])]
+            );
+            asmData.vars.sp = ASM_INT; // no need to add to vars, we are about to denormalize anyhow
+            // we added sp, so we must add stack popping
+            function makePop() {
+              return ['stat', makeAssign(['name', 'STACKTOP'], ['name', 'sp'])];
+            }
+            traverse(func, function(node, type) {
+              var stats = getStatements(node);
+              if (!stats) return;
+              for (var i = 0; i < stats.length; i++) {
+                var subNode = stats[i];
+                if (subNode[0] === 'stat') subNode = subNode[1];
+                if (subNode[0] == 'return') {
+                  stats.splice(i, 0, makePop());
+                  i++;
+                }
+              }
+            });
+            // pop the stack at the end if there is not a return
+            var last = stats[stats.length-1];
+            if (last[0] === 'stat') last = last[1];
+            if (last[0] !== 'return') {
+              stats.push(makePop());
+            }
+          }
+        }
       }
       denormalizeAsm(func, asmData);
     });
+
+    sizeToOutline *= 2; // be more and more conservative about outlining as we look into outlined functions
 
     // TODO: control flow: route returns and breaks. outlined code should have all breaks/continues/returns break into the outermost scope,
     //       after setting a state variable, etc.
 
     if (newFuncs.length > 0) {
-      // We have outlined. Add stack support: header in which we allocate enough stack space TODO
-      // If sp was not present before, add it and before each return, pop the stack. also a final pop if not ending with a return TODO
-      // (none of this should be done in inner functions, of course, just the original)
-
       // add new functions to the toplevel, or create a toplevel if there isn't one
       ast[1].push.apply(ast[1], newFuncs);
 
@@ -3378,10 +3475,9 @@ var passes = {
   unGlobalize: unGlobalize,
   removeAssignsToUndefined: removeAssignsToUndefined,
   //removeUnneededLabelSettings: removeUnneededLabelSettings,
-  simplifyExpressionsPre: simplifyExpressionsPre,
+  simplifyExpressions: simplifyExpressions,
   optimizeShiftsConservative: optimizeShiftsConservative,
   optimizeShiftsAggressive: optimizeShiftsAggressive,
-  simplifyExpressionsPost: simplifyExpressionsPost,
   hoistMultiples: hoistMultiples,
   loopOptimizer: loopOptimizer,
   registerize: registerize,

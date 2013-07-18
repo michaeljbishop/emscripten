@@ -252,10 +252,24 @@ var Functions = {
     for (var i = 0; i < argTypes.length; i++) {
       var type = argTypes[i];
       if (!type) break; // varargs
-      sig += isIntImplemented(type) ? (getBits(type) == 64 ? 'ii' : 'i') : 'f'; // legalized i64s will be i32s
+      if (type in Runtime.FLOAT_TYPES) {
+        sig += 'f';
+      } else {
+        var chunks = getNumIntChunks(type);
+        for (var j = 0; j < chunks; j++) sig += 'i';
+      }
     }
     if (hasVarArgs) sig += 'i';
     return sig;
+  },
+
+  getSignatureReturnType: function(sig) {
+    switch(sig[0]) {
+      case 'v': return 'void';
+      case 'i': return 'i32';
+      case 'f': return 'double';
+      default: throw 'what is this sig? ' + sig;
+    }
   },
 
   // Mark a function as needing indexing. Python will coordinate them all
@@ -449,7 +463,8 @@ var PassManager = {
         Types: Types,
         Variables: Variables,
         Functions: Functions,
-        EXPORTED_FUNCTIONS: EXPORTED_FUNCTIONS // needed for asm.js global constructors (ctors)
+        EXPORTED_FUNCTIONS: EXPORTED_FUNCTIONS, // needed for asm.js global constructors (ctors)
+        Runtime: { GLOBAL_BASE: Runtime.GLOBAL_BASE }
       }));
     } else if (phase == 'funcs') {
       print('\n//FORWARDED_DATA:' + JSON.stringify({

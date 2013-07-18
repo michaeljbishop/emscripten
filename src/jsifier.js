@@ -286,6 +286,8 @@ function JSify(data, functionsOnly, givenFunctions) {
         allocator = 'ALLOC_NONE';
       }
 
+      Variables.globals[item.ident].named = item.named;
+
       if (ASM_JS && (MAIN_MODULE || SIDE_MODULE) && !item.private_ && !NAMED_GLOBALS && isIndexableGlobal(item.ident)) {
         // We need this to be named (and it normally would not be), so that it can be linked to and used from other modules
         Variables.globals[item.ident].linkable = 1;
@@ -602,6 +604,8 @@ function JSify(data, functionsOnly, givenFunctions) {
           var associatedSourceFile = "NO_SOURCE";
       }
       
+      if (DLOPEN_SUPPORT) Functions.getIndex(func.ident);
+
       func.JS += 'function ' + func.ident + '(' + paramIdents.join(', ') + ') {\n';
 
       if (PGO) {
@@ -1470,7 +1474,6 @@ function JSify(data, functionsOnly, givenFunctions) {
     }
 
     args = args.concat(varargs);
-    var argsText = args.join(', ');
 
     // Inline if either we inline whenever we can (and we can), or if there is no noninlined version
     var inline = LibraryManager.library[simpleIdent + '__inline'];
@@ -1492,9 +1495,27 @@ function JSify(data, functionsOnly, givenFunctions) {
       }
     }
 
+    if (callIdent in Functions.implementedFunctions) {
+      // LLVM sometimes bitcasts for no reason. We must call using the exact same type as the actual function is generated as.
+      var numArgs = Functions.implementedFunctions[callIdent].length - 1;
+      if (numArgs !== args.length) {
+        if (VERBOSE) warnOnce('Fixing function call arguments based on signature, on ' + [callIdent, args.length, numArgs]);
+        while (args.length > numArgs) { args.pop(); argsTypes.pop() }
+        while (args.length < numArgs) { args.push('0'); argsTypes.push('i32') }
+      }
+    }
+
     var returnType = 'void';
     if ((byPointer || ASM_JS) && hasReturn) {
       returnType = getReturnType(type);
+      if (callIdent in Functions.implementedFunctions) {
+        // LLVM sometimes bitcasts for no reason. We must call using the exact same type as the actual function is generated as
+        var trueType = Functions.getSignatureReturnType(Functions.implementedFunctions[callIdent]);
+        if (trueType !== returnType && !isIdenticallyImplemented(trueType, returnType)) {
+          if (VERBOSE) warnOnce('Fixing function call based on return type from signature, on ' + [callIdent, returnType, trueType]);
+          returnType = trueType;
+        }
+      }
     }
 
     if (byPointer) {

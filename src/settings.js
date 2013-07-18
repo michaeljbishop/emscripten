@@ -125,6 +125,11 @@ var INLINING_LIMIT = 0;  // A limit on inlining. If 0, we will inline normally i
                          // we will prevent inlining of functions of this size or larger
                          // in closure. 50 is a reasonable setting if you do not want
                          // inlining
+var OUTLINING_LIMIT = 0; // A function size above which we try to automatically break up
+                         // functions into smaller ones, to avoid the downsides of very
+                         // large functions (JS engines often compile them very slowly,
+                         // compile them with lower optimizations, or do not optimize them
+                         // at all). If 0, we do not perform outlining at all.
 
 // Generated code debugging options
 var SAFE_HEAP = 0; // Check each write to the heap, for example, this will give a clear
@@ -326,6 +331,10 @@ var LINKABLE = 0; // If set to 1, this file can be linked with others, either as
                   // the library it will open will then access through an extern.
                   // LINKABLE of 0 is very useful in that we can reduce the size of the
                   // generated code very significantly, by removing everything not actually used.
+
+var DLOPEN_SUPPORT = 0; // Whether to support dlopen(NULL, ...) which enables dynamic access to the
+                        // module's functions and globals. Implies LINKABLE=1, because we do not want
+                        // dead code elimination.
 
 var RUNTIME_TYPE_INFO = 0; // Whether to expose type info to the script at run time. This
                            // increases the size of the generated script, but allows you

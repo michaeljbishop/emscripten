@@ -1124,7 +1124,11 @@ var LibrarySDL = {
     return ret;
   },
 
+  rotozoomSurface__deps: ['zoomSurface'],
   rotozoomSurface: function(src, angle, zoom, smooth) {
+    if (angle % 360 === 0) {
+      return _zoomSurface(src, zoom, zoom, smooth);
+    }
     var srcData = SDL.surfaces[src];
     var w = srcData.width * zoom;
     var h = srcData.height * zoom;
@@ -1854,6 +1858,11 @@ var LibrarySDL = {
   TTF_FontDescent: function(font) {
     var fontData = SDL.fonts[font];
     return Math.floor(fontData.size*0.02); // XXX
+  },
+
+  TTF_FontHeight: function(font) {
+    var fontData = SDL.fonts[font];
+    return fontData.size;
   },
 
   // SDL gfx

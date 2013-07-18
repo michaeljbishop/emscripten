@@ -1981,6 +1981,18 @@ Succeeded!
         self.do_run(src, "1.0 2.0 -1.0 -2.0 2.0 3.0 -2.0 -3.0 "
                          "1 2 -1 -2 2 2 -2 -2")
 
+    def test_llrint(self):
+      if Settings.USE_TYPED_ARRAYS != 2: return self.skip('requires ta2')
+      src = r'''
+        #include <stdio.h>
+        #include <math.h>
+        int main() {
+          printf("%lld\n%lld\n%lld\n%lld\n", llrint(0.1), llrint(0.6), llrint(1.25), llrint(1099511627776.667));
+          return 0;
+        }
+      '''
+      self.do_run(src, '0\n1\n1\n1099511627777\n')
+
     def test_getgep(self):
         # Generated code includes getelementptr (getelementptr, 0, 1), i.e., GEP as the first param to GEP
         src = '''
@@ -4958,6 +4970,130 @@ The current type of b is: 9
       '''
       self.do_run(src, 'time: ') # compilation check, mainly
 
+
+    def test_strptime_tm(self):
+      src=r'''
+        #include <time.h>
+        #include <stdio.h>
+        #include <string.h>
+
+        int main() {
+          struct tm tm;
+          char *ptr = strptime("17410105012000", "%H%M%S%d%m%Y", &tm);
+
+          printf("%s: %s, %d/%d/%d %d:%d:%d", 
+            (ptr != NULL && *ptr=='\0') ? "OK" : "ERR", 
+            tm.tm_wday == 0 ? "Sun" : (tm.tm_wday == 1 ? "Mon" : (tm.tm_wday == 2 ? "Tue" : (tm.tm_wday == 3 ? "Wed" : (tm.tm_wday == 4 ? "Thu" : (tm.tm_wday == 5 ? "Fri" : (tm.tm_wday == 6 ? "Sat" : "ERR")))))),
+            tm.tm_mon+1,
+            tm.tm_mday,
+            tm.tm_year+1900,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec            
+          );
+        }
+      ''' 
+      self.do_run(src, 'OK: Wed, 1/5/2000 17:41:1')
+
+    def test_strptime_days(self):
+      src = r'''
+        #include <time.h>
+        #include <stdio.h>
+        #include <string.h>
+
+        static const struct {
+          const char *input;
+          const char *format;
+        } day_tests[] = {
+          { "2000-01-01", "%Y-%m-%d"},
+          { "03/03/00", "%D"},
+          { "9/9/99", "%x"},
+          { "19990502123412", "%Y%m%d%H%M%S"},
+          { "2001 20 Mon", "%Y %U %a"},
+          { "2006 4 Fri", "%Y %U %a"},
+          { "2001 21 Mon", "%Y %W %a"},
+          { "2013 29 Wed", "%Y %W %a"},
+          { "2000-01-01 08:12:21 AM", "%Y-%m-%d %I:%M:%S %p"},
+          { "2000-01-01 08:12:21 PM", "%Y-%m-%d %I:%M:%S %p"},
+          { "2001 17 Tue", "%Y %U %a"},
+          { "2001 8 Thursday", "%Y %W %a"},
+        };
+
+        int main() {  
+          struct tm tm;
+
+          for (int i = 0; i < sizeof (day_tests) / sizeof (day_tests[0]); ++i) {
+            memset (&tm, '\0', sizeof (tm));
+            char *ptr = strptime(day_tests[i].input, day_tests[i].format, &tm);
+
+            printf("%s: %d/%d/%d (%dth DoW, %dth DoY)\n", (ptr != NULL && *ptr=='\0') ? "OK" : "ERR", tm.tm_mon+1, tm.tm_mday, 1900+tm.tm_year, tm.tm_wday, tm.tm_yday);
+          }
+        }
+      '''
+      self.do_run(src, 'OK: 1/1/2000 (6th DoW, 0th DoY)\n'\
+                       'OK: 3/3/2000 (5th DoW, 62th DoY)\n'\
+                       'OK: 9/9/1999 (4th DoW, 251th DoY)\n'\
+                       'OK: 5/2/1999 (0th DoW, 121th DoY)\n'\
+                       'OK: 5/21/2001 (1th DoW, 140th DoY)\n'\
+                       'OK: 1/27/2006 (5th DoW, 26th DoY)\n'\
+                       'OK: 5/21/2001 (1th DoW, 140th DoY)\n'\
+                       'OK: 7/24/2013 (3th DoW, 204th DoY)\n'\
+                       'OK: 1/1/2000 (6th DoW, 0th DoY)\n'\
+                       'OK: 1/1/2000 (6th DoW, 0th DoY)\n'\
+                       'OK: 5/1/2001 (2th DoW, 120th DoY)\n'\
+                       'OK: 2/22/2001 (4th DoW, 52th DoY)\n'\
+      )
+
+    def test_strptime_reentrant(self):
+      src=r'''
+        #include <time.h>
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+
+        int main () {
+          int result = 0;
+          struct tm tm;
+
+          memset (&tm, 0xaa, sizeof (tm));
+
+          /* Test we don't crash on uninitialized struct tm.
+             Some fields might contain bogus values until everything
+             needed is initialized, but we shouldn't crash.  */
+          if (strptime ("2007", "%Y", &tm) == NULL
+              || strptime ("12", "%d", &tm) == NULL
+              || strptime ("Feb", "%b", &tm) == NULL
+              || strptime ("13", "%M", &tm) == NULL
+              || strptime ("21", "%S", &tm) == NULL
+              || strptime ("16", "%H", &tm) == NULL) {
+            printf("ERR: returned NULL");
+            exit(EXIT_FAILURE);
+          }
+
+          if (tm.tm_sec != 21 || tm.tm_min != 13 || tm.tm_hour != 16
+              || tm.tm_mday != 12 || tm.tm_mon != 1 || tm.tm_year != 107
+              || tm.tm_wday != 1 || tm.tm_yday != 42) {
+            printf("ERR: unexpected tm content (1) - %d/%d/%d %d:%d:%d", tm.tm_mon+1, tm.tm_mday, tm.tm_year+1900, tm.tm_hour, tm.tm_min, tm.tm_sec);
+            exit(EXIT_FAILURE);
+          }
+
+          if (strptime ("8", "%d", &tm) == NULL) {
+            printf("ERR: strptime failed");
+            exit(EXIT_FAILURE);
+          }
+
+          if (tm.tm_sec != 21 || tm.tm_min != 13 || tm.tm_hour != 16
+              || tm.tm_mday != 8 || tm.tm_mon != 1 || tm.tm_year != 107
+              || tm.tm_wday != 4 || tm.tm_yday != 38) {
+            printf("ERR: unexpected tm content (2) - %d/%d/%d %d:%d:%d", tm.tm_mon+1, tm.tm_mday, tm.tm_year+1900, tm.tm_hour, tm.tm_min, tm.tm_sec);
+            exit(EXIT_FAILURE);
+          }
+
+          printf("OK");
+        }
+      '''
+      self.do_run(src, 'OK')
+
     def test_intentional_fault(self):
       # Some programs intentionally segfault themselves, we should compile that into a throw
       src = r'''
@@ -5884,6 +6020,50 @@ def process(filename):
 '''
       self.do_run(src, '100\n200\n13\n42\n',
                   post_build=add_pre_run_and_checks)
+
+    def test_dlfcn_self(self):
+      if Settings.USE_TYPED_ARRAYS == 1: return self.skip('Does not work with USE_TYPED_ARRAYS=1')
+      Settings.DLOPEN_SUPPORT = 1
+
+      src = r'''
+#include <stdio.h>
+#include <dlfcn.h>
+
+int global = 123;
+
+extern "C" __attribute__((noinline)) void foo(int x) {
+  printf("%d\n", x);
+}
+
+extern "C" __attribute__((noinline)) void repeatable() {
+  void* self = dlopen(NULL, RTLD_LAZY);
+  int* global_ptr = (int*)dlsym(self, "global");
+  void (*foo_ptr)(int) = (void (*)(int))dlsym(self, "foo");
+  foo_ptr(*global_ptr);
+  dlclose(self);
+}
+
+int main() {
+  repeatable();
+  repeatable();
+  return 0;
+}'''
+      def post(filename):
+        with open(filename) as f:
+          for line in f:
+            if 'var SYMBOL_TABLE' in line:
+              table = line
+              break
+          else:
+            raise Exception('Could not find symbol table!')
+        import json
+        table = json.loads(table[table.find('{'):table.rfind('}')+1])
+        actual = list(sorted(table.keys()))
+        # ensure there aren't too many globals; we don't want unnamed_addr
+        assert actual == ['_foo', '_global', '_main', '_repeatable'], \
+          "Symbol table does not match: %s" % actual
+
+      self.do_run(src, '123\n123', post_build=(None, post))
 
     def test_rand(self):
       return self.skip('rand() is now random') # FIXME
@@ -7197,18 +7377,8 @@ def process(filename):
       self.do_run(src, expected)
 
     def test_unistd_unlink(self):
-      add_pre_run = '''
-def process(filename):
-  import tools.shared as shared
-  src = open(filename, 'r').read().replace(
-    '// {{PRE_RUN_ADDITIONS}}',
-    open(shared.path_from_root('tests', 'unistd', 'unlink.js'), 'r').read()
-  )
-  open(filename, 'w').write(src)
-'''
       src = open(path_from_root('tests', 'unistd', 'unlink.c'), 'r').read()
-      expected = open(path_from_root('tests', 'unistd', 'unlink.out'), 'r').read()
-      self.do_run(src, expected, post_build=add_pre_run)
+      self.do_run(src, 'success', force_c=True)
 
     def test_unistd_links(self):
       add_pre_run = '''
@@ -9664,7 +9834,7 @@ def process(filename):
         Settings.CORRECT_ROUNDINGS = 0
         self.do_run(src.replace('TYPE', 'long long'), '*-3**2**-6**5*') # JS floor operations, always to the negative. This is an undetected error here!
         self.do_run(src.replace('TYPE', 'int'), '*-2**2**-5**5*') # We get these right, since they are 32-bit and we can shortcut using the |0 trick
-        self.do_run(src.replace('TYPE', 'unsigned int'), '*-3**2**-6**5*') # We fail, since no fast shortcut for 32-bit unsigneds
+        self.do_run(src.replace('TYPE', 'unsigned int'), '*-2**2**-6**5*')
 
       Settings.CORRECT_ROUNDINGS = 1
       Settings.CORRECT_SIGNS = 1 # To be correct here, we need sign corrections as well
@@ -9678,7 +9848,7 @@ def process(filename):
         Settings.CORRECT_ROUNDINGS_LINES = ["src.cpp:13"] # Fix just the last mistake
         self.do_run(src.replace('TYPE', 'long long'), '*-3**2**-5**5*')
         self.do_run(src.replace('TYPE', 'int'), '*-2**2**-5**5*') # Here we are lucky and also get the first one right
-        self.do_run(src.replace('TYPE', 'unsigned int'), '*-3**2**-5**5*') # No such luck here
+        self.do_run(src.replace('TYPE', 'unsigned int'), '*-2**2**-5**5*')
 
       # And reverse the check with = 2
       if Settings.USE_TYPED_ARRAYS != 2: # the errors here are very specific to non-i64 mode 1
@@ -9853,6 +10023,11 @@ finalizing 3 (global == 0)
 
       for k, v in self.env.iteritems():
         del os.environ[k]
+
+      # clear global changes to Building
+      Building.COMPILER_TEST_OPTS = []
+      Building.COMPILER = CLANG
+      Building.LLVM_OPTS = 0
 
     TT.tearDown = tearDown
 
@@ -10451,7 +10626,7 @@ f.close()
         Popen([PYTHON, EMLINK, 'main.js', 'side.js', 'together.js'], stdout=PIPE).communicate()
         assert os.path.exists('together.js')
         for engine in JS_ENGINES:
-          out = run_js('together.js', engine=SPIDERMONKEY_ENGINE, stderr=PIPE, full_output=True)
+          out = run_js('together.js', engine=engine, stderr=PIPE, full_output=True)
           self.assertContained(expected, out)
           if engine == SPIDERMONKEY_ENGINE: self.validate_asmjs(out)
         if first:
@@ -11366,11 +11541,11 @@ f.close()
     def test_js_optimizer(self):
       for input, expected, passes in [
         (path_from_root('tools', 'test-js-optimizer.js'), open(path_from_root('tools', 'test-js-optimizer-output.js')).read(),
-         ['hoistMultiples', 'loopOptimizer', 'removeAssignsToUndefined', 'simplifyExpressionsPre', 'simplifyExpressionsPost']),
+         ['hoistMultiples', 'loopOptimizer', 'removeAssignsToUndefined', 'simplifyExpressions']),
         (path_from_root('tools', 'test-js-optimizer-t2c.js'), open(path_from_root('tools', 'test-js-optimizer-t2c-output.js')).read(),
-         ['simplifyExpressionsPre', 'optimizeShiftsConservative']),
+         ['simplifyExpressions', 'optimizeShiftsConservative']),
         (path_from_root('tools', 'test-js-optimizer-t2.js'), open(path_from_root('tools', 'test-js-optimizer-t2-output.js')).read(),
-         ['simplifyExpressionsPre', 'optimizeShiftsAggressive']),
+         ['simplifyExpressions', 'optimizeShiftsAggressive']),
         # Make sure that optimizeShifts handles functions with shift statements.
         (path_from_root('tools', 'test-js-optimizer-t3.js'), open(path_from_root('tools', 'test-js-optimizer-t3-output.js')).read(),
          ['optimizeShiftsAggressive']),
@@ -11387,13 +11562,15 @@ f.close()
         (path_from_root('tools', 'test-js-optimizer-asm-regs-min.js'), open(path_from_root('tools', 'test-js-optimizer-asm-regs-min-output.js')).read(),
          ['asm', 'registerize']),
         (path_from_root('tools', 'test-js-optimizer-asm-pre.js'), open(path_from_root('tools', 'test-js-optimizer-asm-pre-output.js')).read(),
-         ['asm', 'simplifyExpressionsPre']),
+         ['asm', 'simplifyExpressions']),
         (path_from_root('tools', 'test-js-optimizer-asm-last.js'), open(path_from_root('tools', 'test-js-optimizer-asm-last-output.js')).read(),
          ['asm', 'last']),
         (path_from_root('tools', 'test-js-optimizer-asm-relocate.js'), open(path_from_root('tools', 'test-js-optimizer-asm-relocate-output.js')).read(),
          ['asm', 'relocate']),
-        #(path_from_root('tools', 'test-js-optimizer-asm-outline.js'), open(path_from_root('tools', 'test-js-optimizer-asm-outline-output.js')).read(),
-        # ['asm', 'outline']),
+        (path_from_root('tools', 'test-js-optimizer-asm-outline1.js'), open(path_from_root('tools', 'test-js-optimizer-asm-outline1-output.js')).read(),
+         ['asm', 'outline']),
+        (path_from_root('tools', 'test-js-optimizer-asm-outline2.js'), open(path_from_root('tools', 'test-js-optimizer-asm-outline2-output.js')).read(),
+         ['asm', 'outline']),
       ]:
         print input
         output = Popen(listify(NODE_JS) + [path_from_root('tools', 'js-optimizer.js'), input] + passes, stdin=PIPE, stdout=PIPE).communicate()[0]
@@ -12642,8 +12819,9 @@ Press any key to continue.'''
       self.run_browser('page.html', 'Should print "(300, 150)" -- the size of the canvas in pixels', '/report_result?1')
 
     def test_freealut(self):
-      programs = self.get_library('freealut', os.path.join('examples', 'hello_world.bc'), make_args=['EXEEXT=.bc'])
+      programs = self.get_library('freealut', os.path.join('examples', '.libs', 'hello_world.bc'), make_args=['EXEEXT=.bc'])
       for program in programs:
+        assert os.path.exists(program)
         Popen([PYTHON, EMCC, '-O2', program, '-o', 'page.html']).communicate()
         self.run_browser('page.html', 'You should hear "Hello World!"')
 
