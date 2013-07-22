@@ -4179,7 +4179,8 @@ var LibraryGL = {
   glGetTexLevelParameteriv: function() { throw 'glGetTexLevelParameteriv: TODO' },
 
   glShadeModel: function() { Runtime.warnOnce('TODO: glShadeModel') },
-
+  glLogicOp: function() { Runtime.warnOnce('TODO: glLogicOp is ignored') },
+  
   // Open GLES1.1 compatibility
 
   glGenFramebuffersOES : 'glGenFramebuffers',
