@@ -796,6 +796,7 @@ Math['imul'] = function(a, b) {
   return (a*b)|0; // fast but imprecise
 };
 #endif
+Math.imul = Math['imul'];
 
 // A counter of dependencies for calling run(). If we need to
 // do asynchronous work before running, increment this and

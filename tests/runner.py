@@ -27,6 +27,7 @@ Running the main part of the test suite. Don't forget to run the other parts!
   benchmark - run before and after each set of changes before pushing to
               master, verify no regressions
   browser - runs pages in a web browser
+  browser audio - runs audio tests in a web browser (requires human verification)
 
 To run one of those parts, do something like
 
@@ -270,6 +271,8 @@ process(sys.argv[1])
       print >> sys.stderr, "[was asm.js'ified]"
     elif 'asm.js' in err: # if no asm.js error, then not an odin build
       raise Exception("did NOT asm.js'ify")
+    err = '\n'.join(filter(lambda line: 'successfully compiled asm.js code' not in line, err.split('\n')))
+    return err
 
   def run_generated_code(self, engine, filename, args=[], check_timeout=True, output_nicerizer=None):
     stdout = os.path.join(self.get_dir(), 'stdout') # use files, as PIPE can get too full and hang us
@@ -285,7 +288,7 @@ process(sys.argv[1])
     out = open(stdout, 'r').read()
     err = open(stderr, 'r').read()
     if engine == SPIDERMONKEY_ENGINE and Settings.ASM_JS:
-      self.validate_asmjs(err)
+      err = self.validate_asmjs(err)
     if output_nicerizer:
       ret = output_nicerizer(out, err)
     else:
@@ -2966,6 +2969,37 @@ back
           self.emcc_args.pop() ; self.emcc_args.pop() # disable closure to work around a closure bug
         self.do_run(src, 'Throw...Construct...Catched...Destruct...Throw...Construct...Copy...Catched...Destruct...Destruct...')
 
+    def test_exception_2(self):
+      if self.emcc_args is None: return self.skip('need emcc to add in libcxx properly')
+      Settings.DISABLE_EXCEPTION_CATCHING = 0
+      src = r'''
+        #include <stdexcept>
+        #include <stdio.h>
+
+        typedef void (*FuncPtr)();
+
+        void ThrowException()
+        {
+	        throw std::runtime_error("catch me!");
+        }
+
+        FuncPtr ptr = ThrowException;
+
+        int main()
+        {
+	        try
+	        {
+		        ptr();
+	        }
+	        catch(...)
+	        {
+		        printf("Exception caught successfully!\n");
+	        }
+	        return 0;
+        }
+      '''
+      self.do_run(src, 'Exception caught successfully!')
+
     def test_white_list_exception(self):
       Settings.DISABLE_EXCEPTION_CATCHING = 2
       Settings.EXCEPTION_CATCHING_WHITELIST = ["__Z12somefunctionv"]
@@ -4028,6 +4062,11 @@ def process(filename):
         Settings.EXPORTED_FUNCTIONS = ['_main', '_save_me_aimee']
         self.do_run(src, 'hello world!\n*100*\n*fivesix*\nmann\n', post_build=check)
 
+        # test EXPORT_ALL
+        Settings.EXPORTED_FUNCTIONS = []
+        Settings.EXPORT_ALL = 1
+        self.do_run(src, 'hello world!\n*100*\n*fivesix*\nmann\n', post_build=check)
+
     def test_inlinejs(self):
         if Settings.ASM_JS: return self.skip('asm does not support random code, TODO: something that works in asm')
         src = r'''
@@ -4520,6 +4559,22 @@ The original type of b is: 9
 The current address of a is: 0x12345678
 The current type of b is: 9
 ''')
+
+    def test_functionpointer_libfunc_varargs(self):
+      src = r'''
+        #include <stdio.h>
+        #include <fcntl.h>
+        typedef int (*fp_t)(int, int, ...);
+        int main(int argc, char **argv) {
+          fp_t fp = &fcntl;
+          if (argc == 1337) fp = (fp_t)&main;
+          (*fp)(0, 10);
+          (*fp)(0, 10, 5);
+          printf("waka\n");
+          return 0;
+        }
+      '''
+      self.do_run(src, '''waka''')
 
     def test_structbyval(self):
         Settings.INLINING_LIMIT = 50
@@ -5093,6 +5148,162 @@ The current type of b is: 9
         }
       '''
       self.do_run(src, 'OK')
+
+    def test_strftime(self):
+      src=r'''
+        #include <time.h>
+        #include <stdio.h>
+        #include <string.h>
+        #include <stdlib.h>
+
+        void test(int result, const char* comment, const char* parsed = "") {
+          printf("%d",result);
+          if (!result) {
+            printf("\nERROR: %s (\"%s\")\n", comment, parsed);
+          }
+        }
+
+        int cmp(const char *s1, const char *s2) {
+          for ( ; *s1 == *s2 ; s1++,s2++ ) {
+            if ( *s1 == '\0' )
+              break;
+          } 
+
+          return (*s1 - *s2);
+        }
+
+        int main() {
+            struct tm tm;
+            char s[1000];
+            size_t size;
+            
+            tm.tm_sec = 4;
+            tm.tm_min = 23;
+            tm.tm_hour = 20;
+            tm.tm_mday = 21;
+            tm.tm_mon = 1;
+            tm.tm_year = 74;
+            tm.tm_wday = 4;
+            tm.tm_yday = 51;
+            tm.tm_isdst = 0;
+            
+            size = strftime(s, 1000, "", &tm);
+            test((size==0) && (*s=='\0'), "strftime test #1", s);
+
+            size = strftime(s, 1000, "%a", &tm);
+            test((size==3) && !cmp(s, "Thu"), "strftime test #2", s);
+
+            size = strftime(s, 1000, "%A", &tm);
+            test((size==8) && !cmp(s, "Thursday"), "strftime test #3", s);
+
+            size = strftime(s, 1000, "%b", &tm);
+            test((size==3) && !cmp(s, "Feb"), "strftime test #4", s);
+
+            size = strftime(s, 1000, "%B", &tm);
+            test((size==8) && !cmp(s, "February"),
+                               "strftime test #5", s);
+
+            size = strftime(s, 1000, "%d", &tm);
+            test((size==2) && !cmp(s, "21"),
+                               "strftime test #6", s);
+
+            size = strftime(s, 1000, "%H", &tm);
+            test((size==2) && !cmp(s, "20"),
+                               "strftime test #7", s);
+
+            size = strftime(s, 1000, "%I", &tm);
+            test((size==2) && !cmp(s, "08"),
+                               "strftime test #8", s);
+
+            size = strftime(s, 1000, "%j", &tm);
+            test((size==3) && !cmp(s, "052"),
+                               "strftime test #9", s);
+
+            size = strftime(s, 1000, "%m", &tm);
+            test((size==2) && !cmp(s, "02"),
+                               "strftime test #10", s);
+
+            size = strftime(s, 1000, "%M", &tm);
+            test((size==2) && !cmp(s, "23"),
+                               "strftime test #11", s);
+
+            size = strftime(s, 1000, "%p", &tm);
+            test((size==2) && !cmp(s, "PM"),
+                               "strftime test #12", s);
+
+            size = strftime(s, 1000, "%S", &tm);
+            test((size==2) && !cmp(s, "04"),
+                               "strftime test #13", s);
+
+            size = strftime(s, 1000, "%U", &tm);
+            test((size==2) && !cmp(s, "07"),
+                               "strftime test #14", s);
+
+            size = strftime(s, 1000, "%w", &tm);
+            test((size==1) && !cmp(s, "4"),
+                               "strftime test #15", s);
+
+            size = strftime(s, 1000, "%W", &tm);
+            test((size==2) && !cmp(s, "07"),
+                               "strftime test #16", s);
+
+            size = strftime(s, 1000, "%y", &tm);
+            test((size==2) && !cmp(s, "74"),
+                               "strftime test #17", s);
+
+            size = strftime(s, 1000, "%Y", &tm);
+            test((size==4) && !cmp(s, "1974"),
+                               "strftime test #18", s);
+
+            size = strftime(s, 1000, "%%", &tm);
+            test((size==1) && !cmp(s, "%"),
+                               "strftime test #19", s);
+
+            size = strftime(s, 5, "%Y", &tm);
+            test((size==4) && !cmp(s, "1974"),
+                               "strftime test #20", s);
+
+            size = strftime(s, 4, "%Y", &tm);
+            test((size==0), "strftime test #21", s);
+
+            tm.tm_mon = 0;
+            tm.tm_mday = 1;
+            size = strftime(s, 10, "%U", &tm);
+            test((size==2) && !cmp(s, "00"), "strftime test #22", s);
+
+            size = strftime(s, 10, "%W", &tm);
+            test((size==2) && !cmp(s, "00"), "strftime test #23", s);
+
+            // 1/1/1973 was a Sunday and is in CW 1
+            tm.tm_year = 73;
+            size = strftime(s, 10, "%W", &tm);
+            test((size==2) && !cmp(s, "01"), "strftime test #24", s);
+
+            // 1/1/1978 was a Monday and is in CW 1
+            tm.tm_year = 78;
+            size = strftime(s, 10, "%U", &tm);
+            test((size==2) && !cmp(s, "01"), "strftime test #25", s);
+
+            // 2/1/1999
+            tm.tm_year = 99;
+            tm.tm_yday = 1;
+            size = strftime(s, 10, "%G (%V)", &tm);
+            test((size==9) && !cmp(s, "1998 (53)"), "strftime test #26", s);
+
+            size = strftime(s, 10, "%g", &tm);
+            test((size==2) && !cmp(s, "98"), "strftime test #27", s);
+
+            // 30/12/1997
+            tm.tm_year = 97;
+            tm.tm_yday = 363;
+            size = strftime(s, 10, "%G (%V)", &tm);
+            test((size==9) && !cmp(s, "1998 (01)"), "strftime test #28", s);
+
+            size = strftime(s, 10, "%g", &tm);
+            test((size==2) && !cmp(s, "98"), "strftime test #29", s);
+        } 
+      '''
+      self.do_run(src, '11111111111111111111111111111')
 
     def test_intentional_fault(self):
       # Some programs intentionally segfault themselves, we should compile that into a throw
@@ -6785,6 +6996,26 @@ Pass: 0.000012 0.000012''')
       '''
       self.do_run(src, '2,  , black\n2, ., #001100\n2, X, #111100');
 
+    def test_sscanf_6(self):
+      src = r'''
+        #include <stdio.h>
+        #include <string.h>
+        int main()
+        {
+          char *date = "18.07.2013w";
+          char c[10];
+          memset(c, 0, 10);
+          int y, m, d, i;
+          i = sscanf(date, "%d.%d.%4d%c", &d, &m, &y, c);
+          printf("date: %s; day %2d, month %2d, year %4d, extra: %c, %d\n", date, d, m, y, c[0], i);
+          i = sscanf(date, "%d.%d.%3c", &d, &m, c);
+          printf("date: %s; day %2d, month %2d, year %4d, extra: %s, %d\n", date, d, m, y, c, i);
+        }
+      '''
+      self.do_run(src, '''date: 18.07.2013w; day 18, month  7, year 2013, extra: w, 4
+date: 18.07.2013w; day 18, month  7, year 2013, extra: 201, 3
+''');
+
     def test_sscanf_skip(self):
       if Settings.USE_TYPED_ARRAYS != 2: return self.skip("need ta2 for full i64")
 
@@ -6853,7 +7084,7 @@ def process(filename):
       other.close()
 
       src = open(path_from_root('tests', 'files.cpp'), 'r').read()
-      self.do_run(src, 'size: 7\ndata: 100,-56,50,25,10,77,123\nloop: 100 -56 50 25 10 77 123 \ninput:hi there!\ntexto\ntexte\n$\n5 : 10,30,20,11,88\nother=some data.\nseeked=me da.\nseeked=ata.\nseeked=ta.\nfscanfed: 10 - hello\nok.\n',
+      self.do_run(src, 'size: 7\ndata: 100,-56,50,25,10,77,123\nloop: 100 -56 50 25 10 77 123 \ninput:hi there!\ntexto\n$\n5 : 10,30,20,11,88\nother=some data.\nseeked=me da.\nseeked=ata.\nseeked=ta.\nfscanfed: 10 - hello\nok.\ntexte\n',
                    post_build=post, extra_emscripten_args=['-H', 'libc/fcntl.h'])
 
     def test_files_m(self):
@@ -6885,7 +7116,7 @@ def process(filename):
           return 0;
         }
         '''
-      self.do_run(src, 'isatty? 0,0,1\ngot: 35\ngot: 45\ngot: 25\ngot: 15\n', post_build=post)
+      self.do_run(src, 'got: 35\ngot: 45\ngot: 25\ngot: 15\nisatty? 0,0,1\n', post_build=post)
 
     def test_fwrite_0(self):
       src = r'''
@@ -6979,23 +7210,19 @@ def process(filename):
       self.do_run(src, 'success', force_c=True)
 
     def test_stat(self):
-      add_pre_run = '''
-def process(filename):
-  src = open(filename, 'r').read().replace(
-    '// {{PRE_RUN_ADDITIONS}}',
-    \'\'\'
-      var f1 = FS.createFolder('/', 'test', true, true);
-      var f2 = FS.createDataFile(f1, 'file', 'abcdef', true, true);
-      var f3 = FS.createLink(f1, 'link', 'file', true, true);
-      var f4 = FS.createDevice(f1, 'device', function(){}, function(){});
-      f1.timestamp = f2.timestamp = f3.timestamp = f4.timestamp = new Date(1200000000000);
-    \'\'\'
-  )
-  open(filename, 'w').write(src)
-'''
-      src = open(path_from_root('tests', 'stat', 'src.c'), 'r').read()
-      expected = open(path_from_root('tests', 'stat', 'output.txt'), 'r').read()
-      self.do_run(src, expected, post_build=add_pre_run, extra_emscripten_args=['-H', 'libc/fcntl.h'])
+      Building.COMPILER_TEST_OPTS += ['-DUSE_OLD_FS='+str(Settings.USE_OLD_FS)]
+      src = open(path_from_root('tests', 'stat', 'test_stat.c'), 'r').read()
+      self.do_run(src, 'success', force_c=True)
+
+    def test_stat_chmod(self):
+      Building.COMPILER_TEST_OPTS += ['-DUSE_OLD_FS='+str(Settings.USE_OLD_FS)]
+      src = open(path_from_root('tests', 'stat', 'test_chmod.c'), 'r').read()
+      self.do_run(src, 'success', force_c=True)
+
+    def test_stat_mknod(self):
+      Building.COMPILER_TEST_OPTS += ['-DUSE_OLD_FS='+str(Settings.USE_OLD_FS)]
+      src = open(path_from_root('tests', 'stat', 'test_mknod.c'), 'r').read()
+      self.do_run(src, 'success', force_c=True)
 
     def test_fcntl(self):
       add_pre_run = '''
@@ -10817,6 +11044,51 @@ f.close()
            args=['-I' + path_from_root('tests', 'bullet', 'src')])
 
 
+    def test_outline(self):
+      def test(name, src, libs, expected, expected_ranges, args=[], suffix='cpp'):
+        print name
+
+        def measure_funcs(filename):
+          i = 0
+          start = -1
+          curr = '?'
+          ret = {}
+          for line in open(filename):
+            i += 1
+            if line.startswith('function '):
+              start = i
+              curr = line
+            elif line.startswith('}'):
+              size = i - start
+              if size > 100: ret[curr] = size
+          return ret
+
+        for outlining_limit in [500, 1000, 2000, 5000, 0]:
+          Popen([PYTHON, EMCC, src] + libs + ['-o', 'test.js', '-O2', '-g3', '-s', 'OUTLINING_LIMIT=%d' % outlining_limit] + args).communicate()
+          assert os.path.exists('test.js')
+          shutil.copyfile('test.js', '%d_test.js' % outlining_limit)
+          for engine in JS_ENGINES:
+            out = run_js('test.js', engine=engine, stderr=PIPE, full_output=True)
+            self.assertContained(expected, out)
+            if engine == SPIDERMONKEY_ENGINE: self.validate_asmjs(out)
+          low = expected_ranges[outlining_limit][0]
+          seen = max(measure_funcs('test.js').values())
+          high = expected_ranges[outlining_limit][1]
+          print outlining_limit, '   ', low, '<=', seen, '<=', high
+          assert low <= seen <= high
+
+      test('zlib', path_from_root('tests', 'zlib', 'example.c'), 
+                   self.get_library('zlib', os.path.join('libz.a'), make_args=['libz.a']),
+                   open(path_from_root('tests', 'zlib', 'ref.txt'), 'r').read(),
+                   {
+                     500: (300, 310),
+                    1000: (360, 370),
+                    2000: (480, 500),
+                    5000: (800, 1100),
+                       0: (1500, 1800)
+                   },
+                   args=['-I' + path_from_root('tests', 'zlib')], suffix='c')
+
     def test_symlink(self):
       if os.name == 'nt':
         return self.skip('Windows FS does not need to be tested for symlinks support, since it does not have them.')
@@ -11806,6 +12078,24 @@ elif 'browser' in str(sys.argv):
   print
   print 'Running the browser tests. Make sure the browser allows popups from localhost.'
   print
+
+  if 'audio' in sys.argv:
+    print
+    print 'Running the browser audio tests. Make sure to listen to hear the correct results!'
+    print
+
+    i = sys.argv.index('audio')
+    sys.argv = sys.argv[:i] + sys.argv[i+1:]
+    i = sys.argv.index('browser')
+    sys.argv = sys.argv[:i] + sys.argv[i+1:]
+    sys.argv += [
+      'browser.test_sdl_audio',
+      'browser.test_sdl_audio_mix_channels',
+      'browser.test_sdl_audio_mix',
+      'browser.test_sdl_audio_quickload',
+      'browser.test_openal_playback',
+      'browser.test_freealut'
+    ]
 
   # Run a server and a web page. When a test runs, we tell the server about it,
   # which tells the web page, which then opens a window with the test. Doing
@@ -13084,6 +13374,9 @@ Press any key to continue.'''
 
     def test_glshaderinfo(self):
       self.btest('glshaderinfo.cpp', '1')
+
+    def test_glgetattachedshaders(self):
+      self.btest('glgetattachedshaders.c', '1')
 
     def test_sdlglshader(self):
       self.btest('sdlglshader.c', reference='sdlglshader.png', args=['-O2', '--closure', '1'])

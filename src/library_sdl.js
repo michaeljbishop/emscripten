@@ -967,7 +967,10 @@ var LibrarySDL = {
     // TODO
   },
 
-  SDL_GetKeyboardState: function() {
+  SDL_GetKeyboardState: function(numKeys) {
+    if (numKeys) {
+      {{{ makeSetValue('numKeys', 0, 0x10000, 'i32') }}};
+    }
     return SDL.keyboardState;
   },
 
@@ -1257,8 +1260,9 @@ var LibrarySDL = {
   IMG_Load_RW: function(rwopsID, freesrc) {
     var rwops = SDL.rwops[rwopsID];
 
-    if ( rwops === undefined )
+    if (rwops === undefined) {
       return 0;
+    }
 
     var filename = rwops.filename;
     
@@ -1269,7 +1273,7 @@ var LibrarySDL = {
       return 0;
     }
     
-    filename = FS.standardizePath(Pointer_stringify(filename));
+    filename = FS.standardizePath(filename);
     if (filename[0] == '/') {
       // Convert the path to relative
       filename = filename.substr(1);
@@ -1447,17 +1451,16 @@ var LibrarySDL = {
   Mix_LoadWAV_RW: function(rwopsID, freesrc) {
     var rwops = SDL.rwops[rwopsID];
 
-    if ( rwops === undefined )
+    if (rwops === undefined)
       return 0;
 
     var filename = '';
     var audio;
     var bytes;
     
-    if ( rwops.filename != undefined )
-    {
+    if (rwops.filename !== undefined) {
       filename = rwops.filename;
-      filename = FS.standardizePath(Pointer_stringify(filename));
+      filename = FS.standardizePath(filename);
       var raw = Module["preloadedAudios"][filename];
       if (!raw) {
         if (raw === null) Module.printErr('Trying to reuse preloaded audio, but freePreloadedMediaOnUse is set!');
@@ -1468,11 +1471,9 @@ var LibrarySDL = {
         if (fileObject === null) Module.printErr('Couldn\'t find file for: ' + filename);
         
         // We found the file. Load the contents
-        if ( fileObject && !fileObject.isFolder && fileObject.read ) {
+        if (fileObject && !fileObject.isFolder && fileObject.read) {
           bytes = fileObject.contents
-        }
-        else {
-          Runtime.warnOnce('Cannot find preloaded audio ' + filename);
+        } else {
           return 0;
         }
       }
@@ -1481,7 +1482,7 @@ var LibrarySDL = {
       }
       audio = raw;
     }
-    else if (rwops.bytes != undefined) {
+    else if (rwops.bytes !== undefined) {
       bytes = HEAPU8.subarray(rwops.bytes, rwops.bytes + rwops.count);
     }
     else {
@@ -1491,7 +1492,7 @@ var LibrarySDL = {
     // Here, we didn't find a preloaded audio but we either were passed a filepath for
     // which we loaded bytes, or we were passed some bytes
     if (audio === undefined && bytes) {
-      var blob = new Blob([new Uint8Array(bytes)], {type: 'audio/ogg'});
+      var blob = new Blob([new Uint8Array(bytes)], {type: rwops.mimetype});
       var url = URL.createObjectURL(blob);
       audio = new Audio();
       audio.src = url;
@@ -2073,13 +2074,14 @@ var LibrarySDL = {
   SDL_InitSubSystem: function(flags) { return 0 },
   SDL_RWFromConstMem: function(mem, size) {
     var id = SDL.rwops.length; // TODO: recycle ids when they are null
-    SDL.rwops.push( { 'bytes': mem, 'count': size } );
+    SDL.rwops.push({ bytes: mem, count: size });
     return id;
   },
 
-  SDL_RWFromFile: function(filename, mode) {
+  SDL_RWFromFile: function(_name, mode) {
     var id = SDL.rwops.length; // TODO: recycle ids when they are null
-    SDL.rwops.push( { 'filename': filename } );
+    var name = Pointer_stringify(_name)
+    SDL.rwops.push({ filename: name, mimetype: Browser.getMimetype(name) });
     return id;
   },
   

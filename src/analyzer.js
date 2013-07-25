@@ -502,18 +502,38 @@ function analyzer(data, sidePass) {
                         { intertype: 'value', ident: j.toString(), type: 'i32' }
                       ]
                     });
-                    var actualSizeType = 'i' + element.bits; // The last one may be smaller than 32 bits
-                    toAdd.push({
+                    var newItem = {
                       intertype: 'load',
                       assignTo: element.ident,
-                      pointerType: actualSizeType + '*',
-                      valueType: actualSizeType,
-                      type: actualSizeType, // XXX why is this missing from intertyper?
-                      pointer: { intertype: 'value', ident: tempVar, type: actualSizeType + '*' },
+                      pointerType: 'i32*',
+                      valueType: 'i32',
+                      type: 'i32',
+                      pointer: { intertype: 'value', ident: tempVar, type: 'i32*' },
                       ident: tempVar,
-                      pointerType: actualSizeType + '*',
                       align: value.align
-                    });
+                    };
+                    var newItem2 = null;
+                    // The last one may be smaller than 32 bits
+                    if (element.bits < 32) {
+                      newItem.assignTo += '$preadd$';
+                      newItem2 = {
+                        intertype: 'mathop',
+                        op: 'and',
+                        assignTo: element.ident,
+                        type: 'i32',
+                        params: [{
+                          intertype: 'value',
+                          type: 'i32',
+                          ident: newItem.assignTo
+                        }, {
+                          intertype: 'value',
+                          type: 'i32',
+                          ident: (0xffffffff >>> (32 - element.bits)).toString()
+                        }],
+                      };
+                    }
+                    toAdd.push(newItem);
+                    if (newItem2) toAdd.push(newItem2);
                     j++;
                   });
                   Types.needAnalysis['[0 x i32]'] = 0;
@@ -1433,15 +1453,14 @@ function analyzer(data, sidePass) {
         func.labelsDict = {};
         func.labelIds = {};
         func.labelIdsInverse = {};
-        func.labelIds[toNiceIdent('%0')] = 1;
-        func.labelIdsInverse[0] = toNiceIdent('%0');
-        func.labelIdCounter = 2;
+        func.labelIdCounter = 1;
         func.labels.forEach(function(label) {
           if (!(label.ident in func.labelIds)) {
             func.labelIds[label.ident] = func.labelIdCounter++;
             func.labelIdsInverse[func.labelIdCounter-1] = label.ident;
           }
         });
+        var entryIdent = func.labels[0].ident;
 
         // Minify label ids to numeric ids.
         func.labels.forEach(function(label) {
@@ -1478,7 +1497,7 @@ function analyzer(data, sidePass) {
         function getActualLabelId(labelId) {
           if (func.labelsDict[labelId]) return labelId;
           // If not present, it must be a surprisingly-named entry (or undefined behavior, in which case, still ok to use the entry)
-          labelId = func.labelIds[ENTRY_IDENT];
+          labelId = func.labelIds[entryIdent];
           assert(func.labelsDict[labelId]);
           return labelId;
         }

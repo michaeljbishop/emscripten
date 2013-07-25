@@ -2997,6 +2997,63 @@ function outline(ast) {
     });
   }
 
+  // Try to flatten out code as much as possible, to make outlining more feasible.
+  function flatten(func, asmData) {
+    var minSize = sizeToOutline/3;
+    var helperId = 0;
+    function getHelper() {
+      while (1) {
+        var ret = 'helper$' + (helperId++);
+        if (!(ret in asmData.vars) && !(ret in asmData.params)) {
+          asmData.vars[ret] = ASM_INT;
+          return ret;
+        }
+      }
+    }
+    traverse(func, function(node) {
+      var stats = getStatements(node);
+      if (stats) {
+        for (var i = 0; i < stats.length; i++) {
+          var node = stats[i]; // step over param
+          var type = node[0];
+          if (measureSize(node) >= minSize) {
+            if (type === 'if') {
+              var reps = [];
+              var helper = getHelper();
+              // clear helper
+              reps.push(['stat', ['assign', true, ['name', helper], ['num', 1]]]);
+              // gather parts
+              var parts = [];
+              var curr = node;
+              while (1) {
+                parts.push({ condition: curr[1], body: curr[2] });
+                curr = curr[3];
+                if (!curr) break;
+                if (curr[0] != 'if') {
+                  parts.push({ condition: null, body: curr });
+                  break;
+                }
+              }
+              // generate flattened code
+              parts.forEach(function(part) {
+                var condition = ['name', helper];
+                if (part.condition) condition = ['conditional', condition, part.condition, ['num', 0]];
+                assert(part.body[0] == 'block');
+                reps.push(makeIf(condition, part.body[1]));
+                getStatements(part.body).unshift(['stat', ['assign', true, ['name', helper], ['num', 0]]]);
+              });
+              // replace code and update i
+              stats.splice.apply(stats, [i, 1].concat(reps));
+              i--; // negate loop increment
+              i += reps.length;
+              continue;
+            }
+          }
+        }
+      }
+    });
+  }
+
   // Prepares information for spilling of local variables
   function analyzeFunction(func, asmData) {
     var stack = []; // list of variables, each gets 8 bytes
@@ -3008,13 +3065,17 @@ function outline(ast) {
     }
     asmData.stackPos = {};
     var stackSize = getStackBumpSize(func);
+    if (stackSize % 8 === 0) stackSize += 8 - (stackSize % 8);
     for (var i = 0; i < stack.length; i++) {
       asmData.stackPos[stack[i]] = stackSize + i*8;
     }
-    // Reserve an extra two spots: one for control flow var, the other for control flow data
-    asmData.extraStackSize = (stack.length + 2)*8;
-    asmData.controlStackPos = stackSize + asmData.extraStackSize - 16;
-    asmData.controlDataStackPos = stackSize + asmData.extraStackSize - 8;
+    // Reserve an extra two spots per possible outlining: one for control flow var, the other for control flow data
+    // The control variables are zeroed out when calling an outlined function, and after using
+    // the value after they return.
+    asmData.maxOutlinings = Math.round(1.5*measureSize(func)/sizeToOutline);
+    asmData.totalStackSize = stackSize + (stack.length + 2*asmData.maxOutlinings)*8;
+    asmData.controlStackPos = function(i) { return stackSize + (stack.length + i)*8 };
+    asmData.controlDataStackPos = function(i) { return stackSize + (stack.length + i)*8 + 4 };
     asmData.splitCounter = 0;
   }
 
@@ -3030,8 +3091,8 @@ function outline(ast) {
     });
 
     var writes = {};
-    var appearances = {};
-    var hasReturn = false, hasBreak = false, hasContinue = false;
+    var namings = {};
+    var hasReturn = false, hasReturnInt = false, hasReturnDouble = false, hasBreak = false, hasContinue = false;
     var breaks = {};    // set of labels we break or continue
     var continues = {}; // to (name -> id, just like labels)
     var breakCapturers = 0;
@@ -3041,16 +3102,21 @@ function outline(ast) {
       if (type == 'assign' && node[2][0] == 'name') {
         var name = node[2][1];
         if (name in asmData.vars || name in asmData.params) {
-          writes[name] = 0;
-          appearances[name] = (appearances[name] || 0) - 1; // this appearance is a definition, offset the counting later
+          writes[name] = (writes[name] || 0) + 1;
         }
       } else if (type == 'name') {
         var name = node[1];
         if (name in asmData.vars || name in asmData.params) {
-          appearances[name] = (appearances[name] || 0) + 1;
+          namings[name] = (namings[name] || 0) + 1;
         }
       } else if (type == 'return') {
-        hasReturn = true;
+        if (!node[1]) {
+          hasReturn = true;
+        } else if (detectAsmCoercion(node[1]) == ASM_INT) {
+          hasReturnInt = true;
+        } else {
+          hasReturnDouble = true;
+        }
       } else if (type == 'break') {
         var label = node[1] || 0;
         if (!label && breakCapturers > 0) return; // no label, and captured
@@ -3079,13 +3145,15 @@ function outline(ast) {
         continueCapturers--;
       }
     });
+    assert(hasReturn + hasReturnInt + hasReturnDouble <= 1);
 
     var reads = {};
-
-    for (var name in appearances) {
-      if (appearances[name] > 0) reads[name] = 0;
+    for (var v in namings) {
+      var actualReads = namings[v] - (writes[v] || 0);
+      if (actualReads > 0) reads[v] = actualReads;
     }
-    return { writes: writes, reads: reads, hasReturn: hasReturn, hasBreak: hasBreak, hasContinue: hasContinue, breaks: breaks, continues: continues, labels: labels };
+
+    return { writes: writes, reads: reads, hasReturn: hasReturn, hasReturnInt: hasReturnInt, hasReturnDouble: hasReturnDouble, hasBreak: hasBreak, hasContinue: hasContinue, breaks: breaks, continues: continues, labels: labels };
   }
 
   function makeAssign(dst, src) {
@@ -3111,24 +3179,43 @@ function outline(ast) {
   var sizeToOutline = extraInfo.sizeToOutline;
   var level = 0;
 
+  var outliningParents = {}; // function name => parent it was outlined from
+
   function doOutline(func, asmData, stats, start, end) {
-    printErr(' do outline ' + [func[1], level, 'range:', start, end, 'of', stats.length]);
+    if (asmData.splitCounter === asmData.maxOutlinings) return [];
+    if (!extraInfo.allowCostlyOutlines) var originalStats = copy(stats);
     var code = stats.slice(start, end+1);
-    var newIdent = func[1] + '$' + (asmData.splitCounter++);
-    // add spills and reads before and after the call to the outlined code, and in the outlined code itself
+    var funcSize = measureSize(func);
+    var outlineIndex = asmData.splitCounter++;
+    var newIdent = func[1] + '$' + outlineIndex;
+    // analyze variables, and find 'owned' variables - that only appear in the outlined code, and do not need any spill support
     var codeInfo = analyzeCode(func, asmData, code);
+    var allCodeInfo = analyzeCode(func, asmData, func);
+    //printErr(' do outline ' + [func[1], level, 'range:', start, end, 'of', stats.length, newIdent, measureSize(code), JSON.stringify(codeInfo.labels), JSON.stringify(codeInfo.breaks), JSON.stringify(codeInfo.continues)]);
+    var owned = { sp: 1 }; // sp is always owned, each has its own
+    keys(setUnion(codeInfo.reads, codeInfo.writes)).forEach(function(v) {
+      if (allCodeInfo.reads[v] === codeInfo.reads[v] && allCodeInfo.writes[v] === codeInfo.writes[v] && !(v in asmData.params)) {
+        owned[v] = 1;
+      }
+    });
     var reps = [];
-    for (var v in codeInfo.reads) {
-      if (v != 'sp') {
+    // wipe out control variable
+    reps.push(['stat', makeAssign(makeStackAccess(ASM_INT, asmData.controlStackPos(outlineIndex)), ['num', 0])]);
+    reps.push(['stat', makeAssign(makeStackAccess(ASM_INT, asmData.controlDataStackPos(outlineIndex)), ['num', 0])]); // XXX not really needed
+    // add spills and reads before and after the call to the outlined code, and in the outlined code itself
+    keys(setUnion(codeInfo.reads, codeInfo.writes)).forEach(function(v) {
+      if (!(v in owned)) {
         reps.push(['stat', ['assign', true, ['sub', ['name', getAsmType(v, asmData) == ASM_INT ? 'HEAP32' : 'HEAPF32'], ['binary', '>>', ['binary', '+', ['name', 'sp'], ['num', asmData.stackPos[v]]], ['num', '2']]], ['name', v]]]);
       }
-    }
-    reps.push(['stat', ['call', ['name', newIdent], [['name', 'sp']]]]);
+    });
+    reps.push(['stat', ['assign', true, ['name', 'sp'], makeAsmCoercion(['call', ['name', newIdent], [['name', 'sp']]], ASM_INT)]]);
     for (var v in codeInfo.writes) {
-      reps.push(['stat', ['assign', true, ['name', v], makeAsmCoercion(['sub', ['name', getAsmType(v, asmData) == ASM_INT ? 'HEAP32' : 'HEAPF32'], ['binary', '>>', ['binary', '+', ['name', 'sp'], ['num', asmData.stackPos[v]]], ['num', '2']]], getAsmType(v, asmData))]]);
+      if (!(v in owned)) {
+        reps.push(['stat', ['assign', true, ['name', v], makeAsmCoercion(['sub', ['name', getAsmType(v, asmData) == ASM_INT ? 'HEAP32' : 'HEAPF32'], ['binary', '>>', ['binary', '+', ['name', 'sp'], ['num', asmData.stackPos[v]]], ['num', '2']]], getAsmType(v, asmData))]]);
+      }
     }
     // Generate new function
-    if (codeInfo.hasReturn || codeInfo.hasBreak || codeInfo.hasContinue) {
+    if (codeInfo.hasReturn || codeInfo.hasReturnInt || codeInfo.hasReturnDouble || codeInfo.hasBreak || codeInfo.hasContinue) {
       // we need to capture all control flow using a top-level labeled one-time loop in the outlined function
       var breakCapturers = 0;
       var continueCapturers = 0;
@@ -3144,16 +3231,17 @@ function outline(ast) {
         if (stats) {
           for (var i = 0; i < stats.length; i++) {
             var node = stats[i]; // step all over node and type here, for convenience
+            if (node[0] == 'stat') node = node[1];
             var type = node[0];
             var ret = null;
             if (type == 'return') {
               ret = [];
               if (!node[1]) {
-                ret.push(['stat', makeAssign(makeStackAccess(ASM_INT, asmData.controlStackPos), ['num', CONTROL_RETURN_VOID])]);
+                ret.push(['stat', makeAssign(makeStackAccess(ASM_INT, asmData.controlStackPos(outlineIndex)), ['num', CONTROL_RETURN_VOID])]);
               } else {
                 var type = detectAsmCoercion(node[1], asmData);
-                ret.push(['stat', makeAssign(makeStackAccess(ASM_INT, asmData.controlStackPos), ['num', type == ASM_INT ? CONTROL_RETURN_INT : CONTROL_RETURN_DOUBLE])]);
-                ret.push(['stat', makeAssign(makeStackAccess(type, asmData.controlDataStackPos), node[1])]);
+                ret.push(['stat', makeAssign(makeStackAccess(ASM_INT, asmData.controlStackPos(outlineIndex)), ['num', type == ASM_INT ? CONTROL_RETURN_INT : CONTROL_RETURN_DOUBLE])]);
+                ret.push(['stat', makeAssign(makeStackAccess(type, asmData.controlDataStackPos(outlineIndex)), node[1])]);
               }
               ret.push(['stat', ['break', 'OL']]);
             } else if (type == 'break') {
@@ -3161,20 +3249,20 @@ function outline(ast) {
               if (label == 'OL') continue; // this was just added before us, it is new replacement code
               if (!label && breakCapturers > 0) continue; // no label, and captured
               if (label && (label in codeInfo.labels)) continue; // label, and defined in this code, so captured
-              ret = [['stat', makeAssign(makeStackAccess(ASM_INT, asmData.controlStackPos), ['num', label ? CONTROL_BREAK_LABEL : CONTROL_BREAK])]];
+              ret = [['stat', makeAssign(makeStackAccess(ASM_INT, asmData.controlStackPos(outlineIndex)), ['num', label ? CONTROL_BREAK_LABEL : CONTROL_BREAK])]];
               if (label) {
                 assert(label in codeInfo.breaks);
-                ret.push(['stat', makeAssign(makeStackAccess(ASM_INT, asmData.controlDataStackPos), ['num', codeInfo.breaks[label]])]);
+                ret.push(['stat', makeAssign(makeStackAccess(ASM_INT, asmData.controlDataStackPos(outlineIndex)), ['num', codeInfo.breaks[label]])]);
               }
               ret.push(['stat', ['break', 'OL']]);
             } else if (type == 'continue') {
               var label = node[1] || 0;
               if (!label && continueCapturers > 0) continue; // no label, and captured
               if (label && (label in codeInfo.labels)) continue; // label, and defined in this code, so captured
-              ret = [['stat', makeAssign(makeStackAccess(ASM_INT, asmData.controlStackPos), ['num', label ? CONTROL_CONTINUE_LABEL : CONTROL_CONTINUE])]];
+              ret = [['stat', makeAssign(makeStackAccess(ASM_INT, asmData.controlStackPos(outlineIndex)), ['num', label ? CONTROL_CONTINUE_LABEL : CONTROL_CONTINUE])]];
               if (label) {
                 assert(label in codeInfo.continues);
-                ret.push(['stat', makeAssign(makeStackAccess(ASM_INT, asmData.controlDataStackPos), ['num', codeInfo.continues[label]])]);
+                ret.push(['stat', makeAssign(makeStackAccess(ASM_INT, asmData.controlDataStackPos(outlineIndex)), ['num', codeInfo.continues[label]])]);
               }
               ret.push(['stat', ['break', 'OL']]);
             }
@@ -3193,61 +3281,84 @@ function outline(ast) {
         }
       });
       code = [['label', 'OL', ['do', ['num', 0], ['block', code]]]]; // do this after processing, to not confuse breakCapturers etc.
-      // read the control data at the callsite to the outlined function
+      // read the control data at the callsite to the outlined function, and clear the control values
+      reps.push(['stat', makeAssign(
+        ['name', 'tempValue'],
+        makeAsmCoercion(makeStackAccess(ASM_INT, asmData.controlStackPos(outlineIndex)), ASM_INT)
+      )]);
+      reps.push(['stat', makeAssign(
+        ['name', 'tempInt'],
+        makeAsmCoercion(makeStackAccess(ASM_INT, asmData.controlDataStackPos(outlineIndex)), ASM_INT)
+      )]);
+      reps.push(['stat', makeAssign(
+        ['name', 'tempDouble'],
+        makeAsmCoercion(makeStackAccess(ASM_DOUBLE, asmData.controlDataStackPos(outlineIndex)), ASM_DOUBLE)
+      )]);
+      reps.push(['stat', makeAssign(makeStackAccess(ASM_INT, asmData.controlStackPos(outlineIndex)), ['num', 0])]);
+      reps.push(['stat', makeAssign(makeStackAccess(ASM_INT, asmData.controlDataStackPos(outlineIndex)), ['num', 0])]); // XXX not really needed
+      // use the control data information
       if (codeInfo.hasReturn) {
         reps.push(makeIf(
-          makeComparison(makeAsmCoercion(makeStackAccess(ASM_INT, asmData.controlStackPos), ASM_INT), '==', ['num', CONTROL_RETURN_VOID]),
+          makeComparison(makeAsmCoercion(['name', 'tempValue'], ASM_INT), '==', ['num', CONTROL_RETURN_VOID]),
           [['stat', ['return']]]
         ));
+      }
+      if (codeInfo.hasReturnInt) {
         reps.push(makeIf(
-          makeComparison(makeAsmCoercion(makeStackAccess(ASM_INT, asmData.controlStackPos), ASM_INT), '==', ['num', CONTROL_RETURN_INT]),
-          [['stat', ['return', makeStackAccess(ASM_INT, asmData.controlDataStackPos)]]]
+          makeComparison(makeAsmCoercion(['name', 'tempValue'], ASM_INT), '==', ['num', CONTROL_RETURN_INT]),
+          [['stat', ['return', makeAsmCoercion(['name', 'tempInt'], ASM_INT)]]]
         ));
+      }
+      if (codeInfo.hasReturnDouble) {
         reps.push(makeIf(
-          makeComparison(makeAsmCoercion(makeStackAccess(ASM_INT, asmData.controlStackPos), ASM_INT), '==', ['num', CONTROL_RETURN_DOUBLE]),
-          [['stat', ['return', makeStackAccess(ASM_DOUBLE, asmData.controlDataStackPos)]]]
+          makeComparison(makeAsmCoercion(['name', 'tempValue'], ASM_INT), '==', ['num', CONTROL_RETURN_DOUBLE]),
+          [['stat', ['return', makeAsmCoercion(['name', 'tempDouble'], ASM_DOUBLE)]]]
         ));
       }
       if (codeInfo.hasBreak) {
         reps.push(makeIf(
-          makeComparison(makeAsmCoercion(makeStackAccess(ASM_INT, asmData.controlStackPos), ASM_INT), '==', ['num', CONTROL_BREAK]),
+          makeComparison(makeAsmCoercion(['name', 'tempValue'], ASM_INT), '==', ['num', CONTROL_BREAK]),
           [['stat', ['break']]]
         ));
         if (keys(codeInfo.breaks).length > 0) {
           reps.push(makeIf(
-            makeComparison(makeAsmCoercion(makeStackAccess(ASM_INT, asmData.controlStackPos), ASM_INT), '==', ['num', CONTROL_BREAK_LABEL]),
-            [makeSwitch(makeAsmCoercion(makeStackAccess(ASM_INT, asmData.controlDataStackPos), ASM_INT), keys(codeInfo.breaks).map(function(key) {
+            makeComparison(makeAsmCoercion(['name', 'tempValue'], ASM_INT), '==', ['num', CONTROL_BREAK_LABEL]),
+            [makeSwitch(makeAsmCoercion(['name', 'tempInt'], ASM_INT), keys(codeInfo.breaks).map(function(key) {
               var id = codeInfo.breaks[key];
-              return [['num', id], [['stat', ['break', key]]]];
+              return [['num', id], [['block', [['stat', ['break', key]]]]]];
             }))]
           ));
         }
       }
       if (codeInfo.hasContinue) {
         reps.push(makeIf(
-          makeComparison(makeAsmCoercion(makeStackAccess(ASM_INT, asmData.controlStackPos), ASM_INT), '==', ['num', CONTROL_CONTINUE]),
+          makeComparison(makeAsmCoercion(['name', 'tempValue'], ASM_INT), '==', ['num', CONTROL_CONTINUE]),
           [['stat', ['continue']]]
         ));
         if (keys(codeInfo.continues).length > 0) {
           reps.push(makeIf(
-            makeComparison(makeAsmCoercion(makeStackAccess(ASM_INT, asmData.controlStackPos), ASM_INT), '==', ['num', CONTROL_CONTINUE_LABEL]),
-            [makeSwitch(makeAsmCoercion(makeStackAccess(ASM_INT, asmData.controlDataStackPos), ASM_INT), keys(codeInfo.continues).map(function(key) {
+            makeComparison(makeAsmCoercion(['name', 'tempValue'], ASM_INT), '==', ['num', CONTROL_CONTINUE_LABEL]),
+            [makeSwitch(makeAsmCoercion(['name', 'tempInt'], ASM_INT), keys(codeInfo.continues).map(function(key) {
               var id = codeInfo.continues[key];
-              return [['num', id], [['stat', ['continue', key]]]];
+              return [['num', id], [['block', [['stat', ['continue', key]]]]]];
             }))]
           ));
         }
       }
     }
     // add spills and unspills in outlined code outside the OL loop
-    for (var v in codeInfo.reads) {
-      if (v != 'sp') {
+    keys(setUnion(codeInfo.reads, codeInfo.writes)).forEach(function(v) {
+      if (!(v in owned)) {
         code.unshift(['stat', ['assign', true, ['name', v], makeAsmCoercion(['sub', ['name', getAsmType(v, asmData) == ASM_INT ? 'HEAP32' : 'HEAPF32'], ['binary', '>>', ['binary', '+', ['name', 'sp'], ['num', asmData.stackPos[v]]], ['num', '2']]], getAsmType(v, asmData))]]);
       }
-    }
+    });
     for (var v in codeInfo.writes) {
-      code.push(['stat', ['assign', true, ['sub', ['name', getAsmType(v, asmData) == ASM_INT ? 'HEAP32' : 'HEAPF32'], ['binary', '>>', ['binary', '+', ['name', 'sp'], ['num', asmData.stackPos[v]]], ['num', '2']]], ['name', v]]]);
+      if (!(v in owned)) {
+        code.push(['stat', ['assign', true, ['sub', ['name', getAsmType(v, asmData) == ASM_INT ? 'HEAP32' : 'HEAPF32'], ['binary', '>>', ['binary', '+', ['name', 'sp'], ['num', asmData.stackPos[v]]], ['num', '2']]], ['name', v]]]);
+      }
     }
+    // add final return of sp. the model is that we send sp as the single param, and get it back out
+    code.push(['stat', ['return', makeAsmCoercion(['name', 'sp'], ASM_INT)]]);
     // finalize
     var newFunc = ['defun', newIdent, ['sp'], code];
     var newAsmData = { params: { sp: ASM_INT }, vars: {} };
@@ -3255,30 +3366,83 @@ function outline(ast) {
       if (v != 'sp') newAsmData.vars[v] = getAsmType(v, asmData);
     }
     for (var v in codeInfo.writes) {
-      assert(v != 'sp');
-      newAsmData.vars[v] = getAsmType(v, asmData);
+      if (v != 'sp') newAsmData.vars[v] = getAsmType(v, asmData);
     }
     denormalizeAsm(newFunc, newAsmData);
+    // add outline call markers (we cannot do later outlinings that cut through an outlining call)
+    reps.unshift(['begin-outline-call', newIdent]);
+    reps.push(['end-outline-call', newIdent]);
     // replace in stats
     stats.splice.apply(stats, [start, end-start+1].concat(reps));
+    // final evaluation and processing
+    if (!extraInfo.allowCostlyOutlines && (measureSize(func) >= funcSize || measureSize(newFunc) >= funcSize)) {
+      // abort, this was pointless
+      stats.length = originalStats.length;
+      for (var i = 0; i < stats.length; i++) stats[i] = originalStats[i];
+      return [];
+    }
+    for (var v in owned) {
+      if (v != 'sp') delete asmData.vars[v]; // parent does not need these anymore
+    }
+    // if we just removed a final return from the original function, add one
+    var last = getStatements(func)[getStatements(func).length-1];
+    if (last[0] === 'stat') last = last[1];
+    if (last[0] !== 'return') {
+      if (allCodeInfo.hasReturnInt || allCodeInfo.hasReturnDouble) {
+        getStatements(func).push(['stat', ['return', makeAsmCoercion(['num', 0], allCodeInfo.hasReturnInt ? ASM_INT : ASM_DOUBLE)]]);
+      }
+    }
+    outliningParents[newIdent] = func[1];
     return [newFunc];
   }
 
   function outlineStatements(func, asmData, stats, maxSize) {
     level++;
-    if (measureSize(stats) < sizeToOutline) return;
+    printErr('outlineStatements: ' + [func[1], level, measureSize(func)]);
+    var lastSize = measureSize(stats);
+    if (lastSize < sizeToOutline) { level--; return }
     var ret = [];
     var sizeSeen = 0;
     var end = stats.length-1;
     var i = stats.length;
     var minIndex = stats == getStatements(func) ? getFirstIndexInNormalized(func, asmData) : 0;
-    while (--i >= minIndex) {
+    var canRestart = false;
+    while (1) {
+      i--;
+      if (i < minIndex) {
+        // we might be done. but, if we have just outlined, do a further attempt from the beginning.
+        // (but only if the total costs are not extravagant)
+        var currSize = measureSize(stats);
+        var outlinedSize = measureSize(ret);
+        if (canRestart && currSize > 1.2*sizeToOutline && lastSize - currSize >= 0.75*sizeToOutline) {
+          printErr('restarting ' + func[1] + ' since ' + [currSize, outlinedSize, lastSize] + ' in level ' + level);
+          lastSize = currSize;
+          i = stats.length;
+          end = stats.length-1;
+          sizeSeen = 0;
+          canRestart = false;
+          continue;
+        } else {
+          break;
+        }
+      }
+
       var stat = stats[i];
+      while (stat[0] === 'end-outline-call') {
+        // we cannot outline through an outline call, so include all of it
+        while (stats[--i][0] !== 'begin-outline-call') {
+          assert(i >= 1);
+          assert(stats[i][0] !== 'end-outline-call');
+        }
+        stat = stats[i];
+      }
+
       var size = measureSize(stat);
       //printErr(level + ' size          ' + [i, size]);
       if (size >= sizeToOutline) {
         // this by itself is big enough to inline, recurse into it and find statements to split on
         var subStatements = null;
+        var pre = ret.length;
         traverse(stat, function(node, type) {
           if (type == 'block') {
             if (measureSize(node) >= sizeToOutline) {
@@ -3288,14 +3452,20 @@ function outline(ast) {
             return null; // do not recurse into children, outlineStatements will do so if necessary
           }
         });
-        sizeSeen = 0;
-        continue;
+        if (ret.length > pre) {
+          // we outlined recursively, reset our state here
+          printErr('successful outline in recursion ' + func[1] + ' due to recursive in level ' + level);
+          end = i-1;
+          sizeSeen = 0;
+          canRestart = true;
+          continue;
+        }
       }
       sizeSeen += size;
-      // If this is big enough to outline, but no too big (if very close to the size of the full function,
+      // If this is big enough to outline, but not too big (if very close to the size of the full function,
       // outlining is pointless; remove stats from the end to try to achieve the good case), then outline.
       // Also, try to reduce the size if it is much larger than the hoped-for size
-      while ((sizeSeen > maxSize || sizeSeen > 2*sizeToOutline) && i < end) {
+      while ((sizeSeen > maxSize || sizeSeen > 2*sizeToOutline) && end > i+1 && stats[end][0] !== 'begin-outline-call' && stats[end][0] !== 'end-outline-call') {
         sizeSeen -= measureSize(stats[end]);
         if (sizeSeen >= sizeToOutline) {
           end--;
@@ -3304,10 +3474,26 @@ function outline(ast) {
           break;
         }
       }
+      // verify we are not outlining through an outline call
+      var sum = 0;
+      stats.slice(i, end+1).forEach(function(stat) {
+        if (stat[0] == 'begin-outline-call') {
+          assert(sum == 0);
+          sum++;
+        } else if (stat[0] == 'end-outline-call') {
+          assert(sum == 1);
+          sum--;
+        }
+      });
+      assert(sum == 0);
+      // final decision and action
       if (sizeSeen >= sizeToOutline && sizeSeen <= maxSize) {
         ret.push.apply(ret, doOutline(func, asmData, stats, i, end)); // outline [i, .. ,end] inclusive
+        printErr('performed outline on ' + func[1] + ' of ' + sizeSeen + ', func is now size ' + measureSize(func));
         sizeSeen = 0;
         end = i-1;
+        canRestart = true;
+        continue;
       }
     }
     level--;
@@ -3333,24 +3519,26 @@ function outline(ast) {
       var asmData = normalizeAsm(func);
       var size = measureSize(func);
       if (size >= sizeToOutline) {
+        printErr('trying to reduce the size of ' + func[1] + ' which is ' + size + ' (>= ' + sizeToOutline + ')');
         aggressiveVariableElimination(func, asmData);
+        flatten(func, asmData);
         analyzeFunction(func, asmData);
         var stats = getStatements(func);
-        var ret = outlineStatements(func, asmData, stats, 0.5*size);
+        var ret = outlineStatements(func, asmData, stats, 0.9*size);
+        assert(level == 0);
         if (ret && ret.length > 0) {
           newFuncs.push.apply(newFuncs, ret);
           // We have outlined. Add stack support
-          var extraSpace = asmData.extraStackSize;
           if ('sp' in asmData.vars) {
             // find stack bump (STACKTOP = STACKTOP + X | 0) and add the extra space
             var stackBumpNode = getStackBumpNode(stats);
-            if (stackBumpNode) stackBumpNode[3][2][3][1] += extraSpace;
+            if (stackBumpNode) stackBumpNode[3][2][3][1] = asmData.totalStackSize;
           } else if (!('sp' in asmData.params)) { // if sp is a param, then we are an outlined function, no need to add stack support for us
             // add sp variable and stack bump
             var index = getFirstIndexInNormalized(func, asmData);
             stats.splice(index, 0,
               ['stat', makeAssign(['name', 'sp'], ['name', 'STACKTOP'])],
-              ['stat', makeAssign(['name', 'STACKTOP'], ['binary', '|', ['binary', '+', ['name', 'STACKTOP'], ['num', extraSpace]], ['num', 0]])]
+              ['stat', makeAssign(['name', 'STACKTOP'], ['binary', '|', ['binary', '+', ['name', 'STACKTOP'], ['num', asmData.totalStackSize]], ['num', 0]])]
             );
             asmData.vars.sp = ASM_INT; // no need to add to vars, we are about to denormalize anyhow
             // we added sp, so we must add stack popping
@@ -3377,11 +3565,12 @@ function outline(ast) {
             }
           }
         }
+        printErr('... resulting size of ' + func[1] + ' is ' + measureSize(func));
       }
       denormalizeAsm(func, asmData);
     });
 
-    sizeToOutline *= 2; // be more and more conservative about outlining as we look into outlined functions
+    funcs = null;
 
     // TODO: control flow: route returns and breaks. outlined code should have all breaks/continues/returns break into the outermost scope,
     //       after setting a state variable, etc.
@@ -3390,10 +3579,19 @@ function outline(ast) {
       // add new functions to the toplevel, or create a toplevel if there isn't one
       ast[1].push.apply(ast[1], newFuncs);
 
-      funcs = newFuncs;
-      more = true;
+      // TODO: check if in some cases we do need to outline new functions
+      //funcs = newFuncs.filter(function(newFunc) {
+      //  // recursively outline if we have a large new function that did not come at a high cost
+      //  return measureSize(newFunc) > sizeToOutline && costs[newFunc[1]] < 0.1*sizeToOutline;
+      //});
+      //more = funcs.length > 0;
     }
   }
+
+  // clear out markers
+  traverse(ast, function(node, type) {
+    if (type === 'begin-outline-call' || type === 'end-outline-call') return emptyNode();
+  });
 }
 
 // Last pass utilities

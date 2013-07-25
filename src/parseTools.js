@@ -969,6 +969,12 @@ function generateStructTypes(type) {
         }
         ret[index++] = type;
       } else {
+        if (Runtime.isStructType(type) && type[1] === '0') {
+          // this is [0 x something]. When inside another structure like here, it must be at the end,
+          // and it does nothing
+          assert(i === typeData.fields.length-1);
+          return;
+        }
         add(Types.types[type]);
       }
       var more = (i+1 < typeData.fields.length ? typeData.flatIndexes[i+1] : typeData.flatSize) - (index - start);
@@ -1231,7 +1237,7 @@ function indexizeFunctions(value, type) {
     // add signature to library functions that we now know need indexing
     var sig = Functions.implementedFunctions[value] || Functions.unimplementedFunctions[value];
     if (!sig) {
-      sig = Functions.unimplementedFunctions[value] = Functions.getSignature(out.returnType, out.segments ? out.segments.map(function(segment) { return segment[0].text }) : []);
+      sig = Functions.unimplementedFunctions[value] = Functions.getSignature(out.returnType, out.segments ? out.segments.map(function(segment) { return segment[0].text }) : [], isVarArgsFunctionType(type));
     }
     return Functions.getIndex(value, undefined, sig);
   }
@@ -1694,7 +1700,7 @@ function makeGetSlabs(ptr, type, allowMultiple, unsigned) {
       }
       case 'float': return ['HEAPF32'];
       default: {
-        throw 'what, exactly, can we do for unknown types in TA2?! ' + new Error().stack;
+        throw 'what, exactly, can we do for unknown types in TA2?! ' + [new Error().stack, ptr, type, allowMultiple, unsigned];
       }
     }
   }
