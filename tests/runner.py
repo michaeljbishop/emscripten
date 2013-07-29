@@ -10507,11 +10507,11 @@ Options that are modified or new in %s include:
           assert 'SAFE_HEAP' not in generated, 'safe heap should not be used by default'
           assert ': while(' not in generated, 'when relooping we also js-optimize, so there should be no labelled whiles'
           if closure:
-            if opt_level == 0: assert 'Module._main =' in generated, 'closure compiler should have been run'
-            elif opt_level >= 1: assert 'Module._main=' in generated, 'closure compiler should have been run (and output should be minified)'
+            if opt_level == 0: assert '._main =' in generated, 'closure compiler should have been run'
+            elif opt_level >= 1: assert '._main=' in generated, 'closure compiler should have been run (and output should be minified)'
           else:
             # closure has not been run, we can do some additional checks. TODO: figure out how to do these even with closure
-            assert 'Module._main = ' not in generated, 'closure compiler should not have been run'
+            assert '._main = ' not in generated, 'closure compiler should not have been run'
             if keep_debug:
               assert ('(label)' in generated or '(label | 0)' in generated) == (opt_level <= 1), 'relooping should be in opt >= 2'
               assert ('assert(STACKTOP < STACK_MAX' in generated) == (opt_level == 0), 'assertions should be in opt == 0'
@@ -11051,39 +11051,51 @@ f.close()
         def measure_funcs(filename):
           i = 0
           start = -1
-          curr = '?'
+          curr = None
           ret = {}
           for line in open(filename):
             i += 1
             if line.startswith('function '):
               start = i
               curr = line
-            elif line.startswith('}'):
+            elif line.startswith('}') and curr:
               size = i - start
-              if size > 100: ret[curr] = size
+              ret[curr] = size
+              curr = None
           return ret
 
-        for outlining_limit in [500, 1000, 2000, 5000, 0]:
-          Popen([PYTHON, EMCC, src] + libs + ['-o', 'test.js', '-O2', '-g3', '-s', 'OUTLINING_LIMIT=%d' % outlining_limit] + args).communicate()
-          assert os.path.exists('test.js')
-          shutil.copyfile('test.js', '%d_test.js' % outlining_limit)
-          for engine in JS_ENGINES:
-            out = run_js('test.js', engine=engine, stderr=PIPE, full_output=True)
-            self.assertContained(expected, out)
-            if engine == SPIDERMONKEY_ENGINE: self.validate_asmjs(out)
-          low = expected_ranges[outlining_limit][0]
-          seen = max(measure_funcs('test.js').values())
-          high = expected_ranges[outlining_limit][1]
-          print outlining_limit, '   ', low, '<=', seen, '<=', high
-          assert low <= seen <= high
+        for debug, outlining_limits in [
+          ([], (1000,)),
+          (['-g1'], (1000,)),
+          (['-g2'], (1000,)),
+          (['-g'], (100, 250, 500, 1000, 2000, 5000, 0))
+        ]:
+          for outlining_limit in outlining_limits:
+            print '\n', debug, outlining_limit, '\n'
+            # TODO: test without -g3, tell all sorts
+            Popen([PYTHON, EMCC, src] + libs + ['-o', 'test.js', '-O2'] + debug + ['-s', 'OUTLINING_LIMIT=%d' % outlining_limit] + args).communicate()
+            assert os.path.exists('test.js')
+            shutil.copyfile('test.js', '%d_test.js' % outlining_limit)
+            for engine in JS_ENGINES:
+              out = run_js('test.js', engine=engine, stderr=PIPE, full_output=True)
+              self.assertContained(expected, out)
+              if engine == SPIDERMONKEY_ENGINE: self.validate_asmjs(out)
+            if debug == ['-g']:
+              low = expected_ranges[outlining_limit][0]
+              seen = max(measure_funcs('test.js').values())
+              high = expected_ranges[outlining_limit][1]
+              print outlining_limit, '   ', low, '<=', seen, '<=', high
+              assert low <= seen <= high
 
       test('zlib', path_from_root('tests', 'zlib', 'example.c'), 
                    self.get_library('zlib', os.path.join('libz.a'), make_args=['libz.a']),
                    open(path_from_root('tests', 'zlib', 'ref.txt'), 'r').read(),
                    {
-                     500: (300, 310),
-                    1000: (360, 370),
-                    2000: (480, 500),
+                     100: (190, 250),
+                     250: (300, 330),
+                     500: (250, 310),
+                    1000: (230, 300),
+                    2000: (380, 450),
                     5000: (800, 1100),
                        0: (1500, 1800)
                    },
@@ -11842,6 +11854,8 @@ f.close()
         (path_from_root('tools', 'test-js-optimizer-asm-outline1.js'), open(path_from_root('tools', 'test-js-optimizer-asm-outline1-output.js')).read(),
          ['asm', 'outline']),
         (path_from_root('tools', 'test-js-optimizer-asm-outline2.js'), open(path_from_root('tools', 'test-js-optimizer-asm-outline2-output.js')).read(),
+         ['asm', 'outline']),
+        (path_from_root('tools', 'test-js-optimizer-asm-outline3.js'), open(path_from_root('tools', 'test-js-optimizer-asm-outline3-output.js')).read(),
          ['asm', 'outline']),
       ]:
         print input
@@ -13508,6 +13522,9 @@ Press any key to continue.'''
 
     def test_sdl_alloctext(self):
       self.btest('sdl_alloctext.c', expected='1', args=['-O2', '-s', 'TOTAL_MEMORY=' + str(1024*1024*8)])
+
+    def test_sdl_surface_refcount(self):
+      self.btest('sdl_surface_refcount.c', expected='1')
 
     def test_glbegin_points(self):
       shutil.copyfile(path_from_root('tests', 'screenshot.png'), os.path.join(self.get_dir(), 'screenshot.png'))

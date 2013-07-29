@@ -1743,7 +1743,7 @@ function registerize(ast) {
       }
     });
     vacuum(fun);
-    if (extraInfo) {
+    if (extraInfo && extraInfo.globals) {
       assert(asm);
       var usedGlobals = {};
       var nextLocal = 0;
@@ -1784,16 +1784,17 @@ function registerize(ast) {
           }
         }
       });
-      assert(fun[1] in extraInfo.globals, fun[1]);
-      fun[1] = extraInfo.globals[fun[1]];
-      assert(fun[1]);
+      if (fun[1] in extraInfo.globals) { // if fun was created by a previous optimization pass, it will not be here
+        fun[1] = extraInfo.globals[fun[1]];
+        assert(fun[1]);
+      }
       var nextRegName = 0;
     }
     var regTypes = {};
     function getNewRegName(num, name) {
       if (!asm) return 'r' + num;
       var type = asmData.vars[name];
-      if (!extraInfo) {
+      if (!extraInfo || !extraInfo.globals) {
         var ret = (type ? 'd' : 'i') + num;
         regTypes[ret] = type;
         return ret;
@@ -2872,6 +2873,7 @@ function outline(ast) {
           defs[name] = node;
         } else {
           if (name in asmData.params) {
+            assignments[name] = (assignments[name] || 1) + 1; // init to 1 for initial parameter assignment
             considered[name] = true; // this parameter is not ssa, it must be in a hand-optimized function, so it is not trivial
           }
         }
@@ -2999,7 +3001,7 @@ function outline(ast) {
 
   // Try to flatten out code as much as possible, to make outlining more feasible.
   function flatten(func, asmData) {
-    var minSize = sizeToOutline/3;
+    var minSize = sizeToOutline;
     var helperId = 0;
     function getHelper() {
       while (1) {
@@ -3010,18 +3012,22 @@ function outline(ast) {
         }
       }
     }
+    var ignore = [];
     traverse(func, function(node) {
       var stats = getStatements(node);
       if (stats) {
         for (var i = 0; i < stats.length; i++) {
           var node = stats[i]; // step over param
+          if (ignore.indexOf(node) >= 0) continue;
+          if (node[0] == 'stat') node = node[1];
+          if (ignore.indexOf(node) >= 0) continue;
           var type = node[0];
           if (measureSize(node) >= minSize) {
-            if (type === 'if') {
+            if (type === 'if' && node[3]) {
               var reps = [];
               var helper = getHelper();
               // clear helper
-              reps.push(['stat', ['assign', true, ['name', helper], ['num', 1]]]);
+              reps.push(['stat', ['assign', true, ['name', helper], ['num', 1]]]); // 1 means continue in ifs
               // gather parts
               var parts = [];
               var curr = node;
@@ -3034,13 +3040,41 @@ function outline(ast) {
                   break;
                 }
               }
-              // generate flattened code
+              // chunkify. Each chunk is a chain of if-elses, with the new overhead just on entry and exit
+              var chunks = [];
+              var currSize = 0;
+              var currChunk = [];
               parts.forEach(function(part) {
-                var condition = ['name', helper];
-                if (part.condition) condition = ['conditional', condition, part.condition, ['num', 0]];
-                assert(part.body[0] == 'block');
-                reps.push(makeIf(condition, part.body[1]));
-                getStatements(part.body).unshift(['stat', ['assign', true, ['name', helper], ['num', 0]]]);
+                var size = (part.condition ? measureSize(part.condition) : 0) + measureSize(part.body) + 5; // add constant for overhead of extra code
+                assert(size > 0);
+                if (size + currSize >= minSize && currSize) {
+                  chunks.push(currChunk);
+                  currChunk = [];
+                  currSize = 0;
+                }
+                currChunk.push(part);
+                currSize += size;
+              });
+              assert(currSize);
+              chunks.push(currChunk);
+              // generate flattened code
+              chunks.forEach(function(chunk) {
+                var pre = ['stat', ['assign', true, ['name', helper], ['num', 0]]];
+                var chain = null, tail = null;
+                chunk.forEach(function(part) {
+                  // add to chain
+                  var contents = makeIf(part.condition || ['num', 1], part.body[1]);
+                  if (chain) {
+                    tail[3] = contents;
+                  } else {
+                    chain = contents;
+                    ignore.push(contents);
+                  }
+                  tail = contents;
+                });
+                // if none of the ifs were entered, in the final else note that we need to continue
+                tail[3] = ['block', [['stat', ['assign', true, ['name', helper], ['num', 1]]]]];
+                reps.push(makeIf(['name', helper], [pre, chain]));
               });
               // replace code and update i
               stats.splice.apply(stats, [i, 1].concat(reps));
@@ -3072,7 +3106,7 @@ function outline(ast) {
     // Reserve an extra two spots per possible outlining: one for control flow var, the other for control flow data
     // The control variables are zeroed out when calling an outlined function, and after using
     // the value after they return.
-    asmData.maxOutlinings = Math.round(1.5*measureSize(func)/sizeToOutline);
+    asmData.maxOutlinings = Math.round(3*measureSize(func)/sizeToOutline);
     asmData.totalStackSize = stackSize + (stack.length + 2*asmData.maxOutlinings)*8;
     asmData.controlStackPos = function(i) { return stackSize + (stack.length + i)*8 };
     asmData.controlDataStackPos = function(i) { return stackSize + (stack.length + i)*8 + 4 };
@@ -3208,7 +3242,7 @@ function outline(ast) {
         reps.push(['stat', ['assign', true, ['sub', ['name', getAsmType(v, asmData) == ASM_INT ? 'HEAP32' : 'HEAPF32'], ['binary', '>>', ['binary', '+', ['name', 'sp'], ['num', asmData.stackPos[v]]], ['num', '2']]], ['name', v]]]);
       }
     });
-    reps.push(['stat', ['assign', true, ['name', 'sp'], makeAsmCoercion(['call', ['name', newIdent], [['name', 'sp']]], ASM_INT)]]);
+    reps.push(['stat', ['call', ['name', newIdent], [['name', 'sp']]]]);
     for (var v in codeInfo.writes) {
       if (!(v in owned)) {
         reps.push(['stat', ['assign', true, ['name', v], makeAsmCoercion(['sub', ['name', getAsmType(v, asmData) == ASM_INT ? 'HEAP32' : 'HEAPF32'], ['binary', '>>', ['binary', '+', ['name', 'sp'], ['num', asmData.stackPos[v]]], ['num', '2']]], getAsmType(v, asmData))]]);
@@ -3357,8 +3391,6 @@ function outline(ast) {
         code.push(['stat', ['assign', true, ['sub', ['name', getAsmType(v, asmData) == ASM_INT ? 'HEAP32' : 'HEAPF32'], ['binary', '>>', ['binary', '+', ['name', 'sp'], ['num', asmData.stackPos[v]]], ['num', '2']]], ['name', v]]]);
       }
     }
-    // add final return of sp. the model is that we send sp as the single param, and get it back out
-    code.push(['stat', ['return', makeAsmCoercion(['name', 'sp'], ASM_INT)]]);
     // finalize
     var newFunc = ['defun', newIdent, ['sp'], code];
     var newAsmData = { params: { sp: ASM_INT }, vars: {} };
@@ -3366,7 +3398,8 @@ function outline(ast) {
       if (v != 'sp') newAsmData.vars[v] = getAsmType(v, asmData);
     }
     for (var v in codeInfo.writes) {
-      if (v != 'sp') newAsmData.vars[v] = getAsmType(v, asmData);
+      assert(v != 'sp'); // we send sp as a read-only parameter, cannot be written to in outlined code
+      newAsmData.vars[v] = getAsmType(v, asmData);
     }
     denormalizeAsm(newFunc, newAsmData);
     // add outline call markers (we cannot do later outlinings that cut through an outlining call)
@@ -3398,24 +3431,35 @@ function outline(ast) {
 
   function outlineStatements(func, asmData, stats, maxSize) {
     level++;
-    printErr('outlineStatements: ' + [func[1], level, measureSize(func)]);
+    //printErr('outlineStatements: ' + [func[1], level, measureSize(func)]);
     var lastSize = measureSize(stats);
     if (lastSize < sizeToOutline) { level--; return }
     var ret = [];
     var sizeSeen = 0;
     var end = stats.length-1;
     var i = stats.length;
-    var minIndex = stats == getStatements(func) ? getFirstIndexInNormalized(func, asmData) : 0;
     var canRestart = false;
+    var minIndex = 0;
+    function calcMinIndex() {
+      if (stats == getStatements(func)) {
+        minIndex = getFirstIndexInNormalized(func, asmData);
+        for (var i = minIndex; i < stats.length; i++) {
+          var stat = stats[i];
+          if (stat[0] == 'stat') stat = stat[1];
+          if (stat[0] == 'assign' && stat[2][0] == 'name' && stat[2][1] == 'sp') minIndex = i+1; // cannot outline |sp = |
+        }
+      }
+    }
     while (1) {
       i--;
+      calcMinIndex();
       if (i < minIndex) {
         // we might be done. but, if we have just outlined, do a further attempt from the beginning.
         // (but only if the total costs are not extravagant)
         var currSize = measureSize(stats);
         var outlinedSize = measureSize(ret);
         if (canRestart && currSize > 1.2*sizeToOutline && lastSize - currSize >= 0.75*sizeToOutline) {
-          printErr('restarting ' + func[1] + ' since ' + [currSize, outlinedSize, lastSize] + ' in level ' + level);
+          //printErr('restarting ' + func[1] + ' since ' + [currSize, outlinedSize, lastSize] + ' in level ' + level);
           lastSize = currSize;
           i = stats.length;
           end = stats.length-1;
@@ -3431,7 +3475,7 @@ function outline(ast) {
       while (stat[0] === 'end-outline-call') {
         // we cannot outline through an outline call, so include all of it
         while (stats[--i][0] !== 'begin-outline-call') {
-          assert(i >= 1);
+          assert(i >= minIndex+1);
           assert(stats[i][0] !== 'end-outline-call');
         }
         stat = stats[i];
@@ -3454,7 +3498,7 @@ function outline(ast) {
         });
         if (ret.length > pre) {
           // we outlined recursively, reset our state here
-          printErr('successful outline in recursion ' + func[1] + ' due to recursive in level ' + level);
+          //printErr('successful outline in recursion ' + func[1] + ' due to recursive in level ' + level);
           end = i-1;
           sizeSeen = 0;
           canRestart = true;
@@ -3488,8 +3532,12 @@ function outline(ast) {
       assert(sum == 0);
       // final decision and action
       if (sizeSeen >= sizeToOutline && sizeSeen <= maxSize) {
-        ret.push.apply(ret, doOutline(func, asmData, stats, i, end)); // outline [i, .. ,end] inclusive
-        printErr('performed outline on ' + func[1] + ' of ' + sizeSeen + ', func is now size ' + measureSize(func));
+        assert(i >= minIndex);
+        var newFuncs = doOutline(func, asmData, stats, i, end); // outline [i, .. ,end] inclusive
+        if (newFuncs.length) {
+          ret.push.apply(ret, newFuncs);
+          printErr('performed outline on ' + func[1] + ' of ' + sizeSeen + ', func is now size ' + measureSize(func) + ' ==> ' + newFuncs[0][1]);
+        }
         sizeSeen = 0;
         end = i-1;
         canRestart = true;
