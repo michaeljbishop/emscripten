@@ -1165,7 +1165,7 @@ LibraryManager.library = {
     ['i32', 'f_namemax']]),
   statvfs__deps: ['$FS', '__statvfs_struct_layout'],
   statvfs: function(path, buf) {
-    // http://pubs.opengroup.org/onlinepubs/7908799/xsh/stat.html
+    // http://pubs.opengroup.org/onlinepubs/009695399/functions/statvfs.html
     // int statvfs(const char *restrict path, struct statvfs *restrict buf);
     var offsets = ___statvfs_struct_layout;
     // NOTE: None of the constants here are true. We're just returning safe and
@@ -1805,11 +1805,6 @@ LibraryManager.library = {
       return 0;
     } else {
       var bytesRead = 0;
-      while (stream.ungotten.length && nbyte > 0) {
-        {{{ makeSetValue('buf++', '0', 'stream.ungotten.pop()', 'i8') }}}
-        nbyte--;
-        bytesRead++;
-      }
       var contents = stream.object.contents;
       var size = Math.min(contents.length - offset, nbyte);
       assert(size >= 0);
@@ -1853,11 +1848,6 @@ LibraryManager.library = {
       if (stream.object.isDevice) {
         if (stream.object.input) {
           bytesRead = 0;
-          while (stream.ungotten.length && nbyte > 0) {
-            {{{ makeSetValue('buf++', '0', 'stream.ungotten.pop()', 'i8') }}}
-            nbyte--;
-            bytesRead++;
-          }
           for (var i = 0; i < nbyte; i++) {
             try {
               var result = stream.object.input();
@@ -1879,11 +1869,10 @@ LibraryManager.library = {
           return -1;
         }
       } else {
-        var ungotSize = stream.ungotten.length;
         bytesRead = _pread(fildes, buf, nbyte, stream.position);
         assert(bytesRead >= -1);
         if (bytesRead != -1) {
-          stream.position += (stream.ungotten.length - ungotSize) + bytesRead;
+          stream.position += bytesRead;
         }
         return bytesRead;
       }
@@ -3243,7 +3232,7 @@ LibraryManager.library = {
       return -1;
     }
   },
-  fgetc__deps: ['$FS', 'read'],
+  fgetc__deps: ['$FS', 'fread'],
   fgetc__postset: '_fgetc.ret = allocate([0], "i8", ALLOC_STATIC);',
   fgetc: function(stream) {
     // int fgetc(FILE *stream);
@@ -3251,7 +3240,7 @@ LibraryManager.library = {
     if (!FS.streams[stream]) return -1;
     var streamObj = FS.streams[stream];
     if (streamObj.eof || streamObj.error) return -1;
-    var ret = _read(stream, _fgetc.ret, 1);
+    var ret = _fread(_fgetc.ret, 1, 1, stream);
     if (ret == 0) {
       streamObj.eof = true;
       return -1;
@@ -3413,16 +3402,24 @@ LibraryManager.library = {
     // size_t fread(void *restrict ptr, size_t size, size_t nitems, FILE *restrict stream);
     // http://pubs.opengroup.org/onlinepubs/000095399/functions/fread.html
     var bytesToRead = nitems * size;
-    if (bytesToRead == 0) return 0;
-    var bytesRead = _read(stream, ptr, bytesToRead);
+    if (bytesToRead == 0) {
+      return 0;
+    }
+    var bytesRead = 0;
     var streamObj = FS.streams[stream];
-    if (bytesRead == -1) {
+    while (streamObj.ungotten.length && bytesToRead > 0) {
+      {{{ makeSetValue('ptr++', '0', 'streamObj.ungotten.pop()', 'i8') }}}
+      bytesToRead--;
+      bytesRead++;
+    }
+    var err = _read(stream, ptr, bytesToRead);
+    if (err == -1) {
       if (streamObj) streamObj.error = true;
       return 0;
-    } else {
-      if (bytesRead < bytesToRead) streamObj.eof = true;
-      return Math.floor(bytesRead / size);
     }
+    bytesRead += err;
+    if (bytesRead < bytesToRead) streamObj.eof = true;
+    return Math.floor(bytesRead / size);
   },
   freopen__deps: ['$FS', 'fclose', 'fopen', '__setErrNo', '$ERRNO_CODES'],
   freopen: function(filename, mode, stream) {
@@ -3635,13 +3632,18 @@ LibraryManager.library = {
   ungetc: function(c, stream) {
     // int ungetc(int c, FILE *stream);
     // http://pubs.opengroup.org/onlinepubs/000095399/functions/ungetc.html
-    if (FS.streams[stream]) {
-      c = unSign(c & 0xFF);
-      FS.streams[stream].ungotten.push(c);
-      return c;
-    } else {
+    stream = FS.streams[stream];
+    if (!stream) {
       return -1;
     }
+    if (c === {{{ cDefine('EOF') }}}) {
+      // do nothing for EOF character
+      return c;
+    }
+    c = unSign(c & 0xFF);
+    stream.ungotten.push(c);
+    stream.eof = false;
+    return c;
   },
   system__deps: ['__setErrNo', '$ERRNO_CODES'],
   system: function(command) {
@@ -3651,15 +3653,20 @@ LibraryManager.library = {
     ___setErrNo(ERRNO_CODES.EAGAIN);
     return -1;
   },
-  fscanf__deps: ['$FS', '__setErrNo', '$ERRNO_CODES',
-                 '_scanString', 'fgetc', 'fseek', 'ftell'],
+  fscanf__deps: ['$FS', '_scanString', 'fgetc', 'ungetc'],
   fscanf: function(stream, format, varargs) {
     // int fscanf(FILE *restrict stream, const char *restrict format, ... );
     // http://pubs.opengroup.org/onlinepubs/000095399/functions/scanf.html
     if (FS.streams[stream]) {
-      var i = _ftell(stream), SEEK_SET = 0;
-      var get = function () { i++; return _fgetc(stream); };
-      var unget = function () { _fseek(stream, --i, SEEK_SET); };
+      var buffer = [];
+      var get = function() {
+        var c = _fgetc(stream);
+        buffer.push(c);
+        return c;
+      };
+      var unget = function() {
+        _ungetc(buffer.pop(), stream);
+      };
       return __scanString(format, get, unget, varargs);
     } else {
       return -1;
@@ -4441,6 +4448,13 @@ LibraryManager.library = {
   llvm_memmove_i64: 'memmove',
   llvm_memmove_p0i8_p0i8_i32: 'memmove',
   llvm_memmove_p0i8_p0i8_i64: 'memmove',
+
+  bcopy__deps: ['memmove'],
+  bcopy: function(src, dest, num) {
+    // void bcopy(const void *s1, void *s2, size_t n);
+    // http://pubs.opengroup.org/onlinepubs/009695399/functions/bcopy.html
+    _memmove(dest, src, num);
+  },
 
   memset__inline: function(ptr, value, num, align) {
     return makeSetValues(ptr, 0, value, 'null', num, align);

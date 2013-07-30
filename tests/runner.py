@@ -7142,6 +7142,10 @@ def process(filename):
         '''
       self.do_run(src, 'written=0')
 
+    def test_fgetc_ungetc(self):
+      src = open(path_from_root('tests', 'stdio', 'test_fgetc_ungetc.c'), 'r').read()
+      self.do_run(src, 'success', force_c=True)
+
     def test_fgetc_unsigned(self):
       if self.emcc_args is None: return self.skip('requires emcc')
       src = r'''
@@ -9524,7 +9528,10 @@ def process(filename):
             c2.virtualFunc2();
             Module.print('*ok*');
           '''
-          src = open(filename, 'a')
+          code = open(filename).read()
+          src = open(filename, 'w')
+          src.write('var Module = {};\n') # name Module
+          src.write(code)
           src.write(script_src_2 + '\n')
           src.close()
 
@@ -11223,6 +11230,45 @@ f.close()
 
       self.assertContained('libf1\nlibf2\n', run_js(os.path.join(self.get_dir(), 'a.out.js')))
 
+    def test_stdin(self):
+      open('main.cpp', 'w').write(r'''
+#include <stdio.h>
+int main(int argc, char const *argv[])
+{
+    char str[10] = {0};
+    scanf("%10s", str);
+    printf("%s\n", str);
+    return 0;
+}
+''')
+      Building.emcc('main.cpp', output_filename='a.out.js')
+      open('in.txt', 'w').write('abc')
+      # node's stdin support is broken
+      self.assertContained('abc', Popen(listify(SPIDERMONKEY_ENGINE) + ['a.out.js'], stdin=open('in.txt'), stdout=PIPE, stderr=PIPE).communicate()[0])
+
+    def test_ungetc_fscanf(self):
+      open('main.cpp', 'w').write(r'''
+        #include <stdio.h>
+        int main(int argc, char const *argv[])
+        {
+            char str[4] = {0};
+            FILE* f = fopen("my_test.input", "r");
+            if (f == NULL) {
+                printf("cannot open file\n");
+                return -1;
+            }
+            ungetc('x', f);
+            ungetc('y', f);
+            ungetc('z', f);
+            fscanf(f, "%3s", str);
+            printf("%s\n", str);
+            return 0;
+        }
+      ''')
+      open('my_test.input', 'w').write('abc')
+      Building.emcc('main.cpp', ['--embed-file', 'my_test.input'], output_filename='a.out.js')
+      self.assertContained('zyx', Popen(listify(JS_ENGINES[0]) + ['a.out.js'], stdout=PIPE, stderr=PIPE).communicate()[0])
+
     def test_abspaths(self):
       # Includes with absolute paths are generally dangerous, things like -I/usr/.. will get to system local headers, not our portable ones.
 
@@ -12228,6 +12274,7 @@ elif 'browser' in str(sys.argv):
       basename = os.path.basename(expected)
       shutil.copyfile(expected, os.path.join(self.get_dir(), basename))
       open(os.path.join(self.get_dir(), 'reftest.js'), 'w').write('''
+        var Module = eval('Module');
         function doReftest() {
           if (doReftest.done) return;
           doReftest.done = true;
