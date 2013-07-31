@@ -194,6 +194,12 @@ var FORCE_GL_EMULATION = 0; // Forces inclusion of full GL emulation code.
 var DISABLE_GL_EMULATION = 0; // Disable inclusion of full GL emulation code. Useful when you don't want emulation
                               // but do need INCLUDE_FULL_LIBRARY or MAIN_MODULE.
 
+var STB_IMAGE = 0; // Enables building of stb-image, a tiny public-domain library for decoding images, allowing
+                   // decoding of images without using the browser's built-in decoders. The benefit is that this
+                   // can be done synchronously, however, it will not be as fast as the browser itself.
+                   // When enabled, stb-image will be used automatically from IMG_Load and IMG_Load_RW. You
+                   // can also call the stbi_* functions directly yourself.
+
 var DISABLE_EXCEPTION_CATCHING = 0; // Disables generating code to actually catch exceptions. If the code you
                                     // are compiling does not actually rely on catching exceptions (but the
                                     // compiler generates code for it, maybe because of stdlibc++ stuff),
@@ -473,7 +479,7 @@ var C_DEFINES = {
    'D_FMT': '2',
    'D_MD_ORDER': '57',
    'D_T_FMT': '1',
-   'EOF': '-1'
+   'EOF': '-1',
    'ERA': '45',
    'ERA_D_FMT': '46',
    'ERA_D_T_FMT': '47',
@@ -1291,6 +1297,6 @@ var C_DEFINES = {
    '___int8_t_defined': '1',
    '___int_least16_t_defined': '1',
    '___int_least32_t_defined': '1',
-   '___int_least8_t_defined': '1',
+   '___int_least8_t_defined': '1'
 };
 

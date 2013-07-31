@@ -5025,6 +5025,36 @@ The current type of b is: 9
       '''
       self.do_run(src, 'time: ') # compilation check, mainly
 
+    def test_gmtime(self):
+      src = r'''
+        #include <stdio.h>
+        #include <stdlib.h>
+        #include <time.h>
+        #include <assert.h>
+
+        int main(void)
+        {
+            time_t t=time(NULL);
+            struct tm *ptm=gmtime(&t);
+            struct tm tmCurrent=*ptm;
+            int hour=tmCurrent.tm_hour;
+
+            t-=hour*3600; // back to midnight
+            int yday = -1;
+            for(hour=0;hour<24;hour++)
+            {
+                ptm=gmtime(&t);
+                // tm_yday must be constant all day...
+                printf("yday: %d, hour: %d\n", ptm->tm_yday, hour);
+                if (yday == -1) yday = ptm->tm_yday;
+                else assert(yday == ptm->tm_yday);
+                t+=3600; // add one hour
+            }
+            printf("ok!\n");
+            return(0);
+        }
+      '''
+      self.do_run(src, '''ok!''')
 
     def test_strptime_tm(self):
       src=r'''
@@ -5313,7 +5343,7 @@ The current type of b is: 9
           return 0;
         }
         '''
-      self.do_run(src, 'fault on write to 0' if not Settings.ASM_JS else 'Assertion: 0')
+      self.do_run(src, 'fault on write to 0' if not Settings.ASM_JS else 'abort()')
 
     def test_trickystring(self):
       src = r'''
@@ -9060,6 +9090,7 @@ def process(filename):
 
       src = r'''
         #include <stdio.h>
+        #include <stdlib.h>
 
         extern "C" {
           int get_int() { return 5; }
@@ -9082,42 +9113,44 @@ def process(filename):
           if (argc == 15) print_string(argv[0]);
           if (argc == 16) pointer((int*)argv[0]);
           if (argc % 17 == 12) return multi(argc, float(argc)/2, argc+1, argv[0]);
-          return 0;
+          // return 0;
+          exit(0);
         }
       '''
 
       post = '''
 def process(filename):
   src = \'\'\'
-    var Module = {
-      'postRun': function() {
-        Module.print('*');
-        var ret;
-        ret = Module['ccall']('get_int', 'number'); Module.print([typeof ret, ret]);
-        ret = ccall('get_float', 'number'); Module.print([typeof ret, ret.toFixed(2)]);
-        ret = ccall('get_string', 'string'); Module.print([typeof ret, ret]);
-        ret = ccall('print_int', null, ['number'], [12]); Module.print(typeof ret);
-        ret = ccall('print_float', null, ['number'], [14.56]); Module.print(typeof ret);
-        ret = ccall('print_string', null, ['string'], ["cheez"]); Module.print(typeof ret);
-        ret = ccall('print_string', null, ['array'], [[97, 114, 114, 45, 97, 121, 0]]); Module.print(typeof ret);
-        ret = ccall('multi', 'number', ['number', 'number', 'number', 'string'], [2, 1.4, 3, 'more']); Module.print([typeof ret, ret]);
-        var p = ccall('malloc', 'pointer', ['number'], [4]);
-        setValue(p, 650, 'i32');
-        ret = ccall('pointer', 'pointer', ['pointer'], [p]); Module.print([typeof ret, getValue(ret, 'i32')]);
-        Module.print('*');
-        // part 2: cwrap
-        var multi = Module['cwrap']('multi', 'number', ['number', 'number', 'number', 'string']);
-        Module.print(multi(2, 1.4, 3, 'atr'));
-        Module.print(multi(8, 5.4, 4, 'bret'));
-        Module.print('*');
-        // part 3: avoid stack explosion
-        for (var i = 0; i < TOTAL_STACK/60; i++) {
-          ccall('multi', 'number', ['number', 'number', 'number', 'string'], [0, 0, 0, '123456789012345678901234567890123456789012345678901234567890']);
-        }
-        Module.print('stack is ok.');
+    var Module = { noInitialRun: true };
+    \'\'\' + open(filename, 'r').read() + \'\'\'
+    Module.addOnExit(function () {
+      Module.print('*');
+      var ret;
+      ret = Module['ccall']('get_int', 'number'); Module.print([typeof ret, ret]);
+      ret = ccall('get_float', 'number'); Module.print([typeof ret, ret.toFixed(2)]);
+      ret = ccall('get_string', 'string'); Module.print([typeof ret, ret]);
+      ret = ccall('print_int', null, ['number'], [12]); Module.print(typeof ret);
+      ret = ccall('print_float', null, ['number'], [14.56]); Module.print(typeof ret);
+      ret = ccall('print_string', null, ['string'], ["cheez"]); Module.print(typeof ret);
+      ret = ccall('print_string', null, ['array'], [[97, 114, 114, 45, 97, 121, 0]]); Module.print(typeof ret);
+      ret = ccall('multi', 'number', ['number', 'number', 'number', 'string'], [2, 1.4, 3, 'more']); Module.print([typeof ret, ret]);
+      var p = ccall('malloc', 'pointer', ['number'], [4]);
+      setValue(p, 650, 'i32');
+      ret = ccall('pointer', 'pointer', ['pointer'], [p]); Module.print([typeof ret, getValue(ret, 'i32')]);
+      Module.print('*');
+      // part 2: cwrap
+      var multi = Module['cwrap']('multi', 'number', ['number', 'number', 'number', 'string']);
+      Module.print(multi(2, 1.4, 3, 'atr'));
+      Module.print(multi(8, 5.4, 4, 'bret'));
+      Module.print('*');
+      // part 3: avoid stack explosion
+      for (var i = 0; i < TOTAL_STACK/60; i++) {
+        ccall('multi', 'number', ['number', 'number', 'number', 'string'], [0, 0, 0, '123456789012345678901234567890123456789012345678901234567890']);
       }
-    };
-  \'\'\' + open(filename, 'r').read()
+      Module.print('stack is ok.');
+    });
+    Module.callMain();
+  \'\'\'
   open(filename, 'w').write(src)
 '''
 
@@ -9328,6 +9361,26 @@ def process(filename):
         }
       '''
       self.do_run(src, 'abs(-10): 10\nabs(-11): 11');
+
+    def test_embind_2(self):
+      if self.emcc_args is None: return self.skip('requires emcc')
+      Building.COMPILER_TEST_OPTS += ['--bind', '--post-js', 'post.js']
+      open('post.js', 'w').write('''
+        Module.print('lerp ' + Module.lerp(1, 2, 0.66) + '.');
+      ''')
+      src = r'''
+        #include <stdio.h>
+        #include <SDL/SDL.h>
+        #include <emscripten/bind.h>
+        using namespace emscripten;
+        float lerp(float a, float b, float t) {
+            return (1 - t) * a + t * b;
+        }
+        EMSCRIPTEN_BINDINGS(my_module) {
+            function("lerp", &lerp);
+        }
+      '''
+      self.do_run(src, 'lerp 1.66');
 
     def test_scriptaclass(self):
         if self.emcc_args is None: return self.skip('requires emcc')
@@ -11034,6 +11087,23 @@ f.close()
         std::string side() { return "and hello from side"; }
       ''', ['hello from main and hello from side\n'])
 
+      # followup to iostream test: a second linking
+      print 'second linking of a linking output'
+      open('moar.cpp', 'w').write(r'''
+        #include <iostream>
+        struct Moar {
+          Moar() { std::cout << "moar!" << std::endl; }
+        };
+        Moar m;
+      ''')
+      Popen([PYTHON, EMCC, 'moar.cpp', '-o', 'moar.js', '-s', 'SIDE_MODULE=1', '-O2']).communicate()
+      Popen([PYTHON, EMLINK, 'together.js', 'moar.js', 'triple.js'], stdout=PIPE).communicate()
+      assert os.path.exists('triple.js')
+      for engine in JS_ENGINES:
+        out = run_js('triple.js', engine=engine, stderr=PIPE, full_output=True)
+        self.assertContained('moar!\nhello from main and hello from side\n', out)
+        if engine == SPIDERMONKEY_ENGINE: self.validate_asmjs(out)
+
       # zlib compression library. tests function pointers in initializers and many other things
       test('zlib', '', open(path_from_root('tests', 'zlib', 'example.c'), 'r').read(), 
                        self.get_library('zlib', os.path.join('libz.a'), make_args=['libz.a']),
@@ -11974,7 +12044,9 @@ int main(int argc, char const *argv[])
         ([], True), # without --bind, we fail
         (['--bind'], False),
         (['--bind', '-O1'], False),
-        (['--bind', '-O2'], False)
+        (['--bind', '-O2'], False),
+        (['--bind', '-O1', '-s', 'ASM_JS=0'], False),
+        (['--bind', '-O2', '-s', 'ASM_JS=0'], False)
       ]:
         print args, fail
         self.clear()
@@ -12154,6 +12226,7 @@ elif 'browser' in str(sys.argv):
       'browser.test_sdl_audio_mix',
       'browser.test_sdl_audio_quickload',
       'browser.test_openal_playback',
+      'browser.test_openal_buffers',
       'browser.test_freealut'
     ]
 
@@ -12219,7 +12292,7 @@ elif 'browser' in str(sys.argv):
     @classmethod
     def tearDownClass(cls):
       if not hasattr(browser, 'harness_server'): return
-
+      
       browser.harness_server.terminate()
       delattr(browser, 'harness_server')
       print '[Browser harness server terminated]'
@@ -12891,6 +12964,16 @@ Press any key to continue.'''
       shutil.copyfile(path_from_root('tests', 'screenshot.jpg'), os.path.join(self.get_dir(), 'screenshot.not'))
       self.btest('sdl_image_prepare_data.c', reference='screenshot.jpg', args=['--preload-file', 'screenshot.not'])
 
+    def test_sdl_stb_image(self):
+      # load an image file, get pixel data.
+      shutil.copyfile(path_from_root('tests', 'screenshot.jpg'), os.path.join(self.get_dir(), 'screenshot.not'))
+      self.btest('sdl_stb_image.c', reference='screenshot.jpg', args=['-s', 'STB_IMAGE=1', '--preload-file', 'screenshot.not'])
+
+    def test_sdl_stb_image_data(self):
+      # load an image file, get pixel data.
+      shutil.copyfile(path_from_root('tests', 'screenshot.jpg'), os.path.join(self.get_dir(), 'screenshot.not'))
+      self.btest('sdl_stb_image_data.c', reference='screenshot.jpg', args=['-s', 'STB_IMAGE=1', '--preload-file', 'screenshot.not'])
+
     def test_sdl_canvas(self):
       open(os.path.join(self.get_dir(), 'sdl_canvas.c'), 'w').write(self.with_report_result(open(path_from_root('tests', 'sdl_canvas.c')).read()))
 
@@ -13156,6 +13239,10 @@ Press any key to continue.'''
 
       Popen([PYTHON, EMCC, '-O2', os.path.join(self.get_dir(), 'openal_playback.cpp'), '--preload-file', 'audio.wav', '-o', 'page.html']).communicate()
       self.run_browser('page.html', '', '/report_result?1')
+
+    def test_openal_buffers(self):
+      shutil.copyfile(path_from_root('tests', 'sounds', 'the_entertainer.wav'), os.path.join(self.get_dir(), 'the_entertainer.wav'))
+      self.btest('openal_buffers.c', '0', args=['--preload-file', 'the_entertainer.wav'],)
 
     def test_glfw(self):
       open(os.path.join(self.get_dir(), 'glfw.c'), 'w').write(self.with_report_result(open(path_from_root('tests', 'glfw.c')).read()))

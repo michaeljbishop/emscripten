@@ -242,12 +242,6 @@ var tempI64, tempI64b;
 var tempRet0, tempRet1, tempRet2, tempRet3, tempRet4, tempRet5, tempRet6, tempRet7, tempRet8, tempRet9;
 #endif
 
-function abort(text) {
-  Module.print(text + ':\n' + (new Error).stack);
-  ABORT = true;
-  throw "Assertion: " + text;
-}
-
 function assert(condition, text) {
   if (!condition) {
     abort('Assertion failed: ' + text);
@@ -728,6 +722,20 @@ function preMain() {
 function exitRuntime() {
   callRuntimeCallbacks(__ATEXIT__);
 }
+
+Module['addOnInit'] = Module.addOnInit = function addOnInit(cb) {
+  __ATINIT__.unshift(cb);
+};
+
+Module['addOnPreMain'] = Module.addOnPreMain = function addOnPreMain(cb) {
+  __ATMAIN__.unshift(cb);
+};
+
+Module['addOnExit'] = Module.addOnExit = function addOnExit(cb) {
+  __ATEXIT__.unshift(cb);
+};
+
+// TODO add onprerun, onpostrun
 
 // Tools
 
