@@ -10,7 +10,7 @@
 //                   or otherwise).
 
 var LibrarySDL = {
-  $SDL__deps: ['$FS', '$Browser'],
+  $SDL__deps: ['$FS', '$PATH', '$Browser'],
   $SDL: {
     defaults: {
       width: 320,
@@ -318,7 +318,7 @@ var LibrarySDL = {
         usePageCanvas: usePageCanvas,
         source: source,
 
-        isFlagSet: function (flag) {
+        isFlagSet: function(flag) {
           return flags & flag;
         }
       };
@@ -1318,11 +1318,7 @@ var LibrarySDL = {
       }
 
       if (!raw) {
-        filename = FS.standardizePath(filename);
-        if (filename[0] == '/') {
-          // Convert the path to relative
-          filename = filename.substr(1);
-        }
+        filename = PATH.resolve(filename);
         var raw = Module["preloadedImages"][filename];
         if (!raw) {
           if (raw === null) Module.printErr('Trying to reuse preloaded image, but freePreloadedMediaOnUse is set!');
@@ -1532,7 +1528,7 @@ var LibrarySDL = {
   Mix_LoadWAV_RW: function(rwopsID, freesrc) {
     var rwops = SDL.rwops[rwopsID];
 
-    if ( rwops === undefined )
+    if (rwops === undefined)
       return 0;
 
     var filename = '';
@@ -1540,8 +1536,7 @@ var LibrarySDL = {
     var bytes;
     
     if (rwops.filename !== undefined) {
-      filename = rwops.filename;
-      filename = FS.standardizePath(filename);
+      filename = PATH.resolve(rwops.filename);
       var raw = Module["preloadedAudios"][filename];
       if (!raw) {
         if (raw === null) Module.printErr('Trying to reuse preloaded audio, but freePreloadedMediaOnUse is set!');
@@ -1552,8 +1547,8 @@ var LibrarySDL = {
         if (fileObject === null) Module.printErr('Couldn\'t find file for: ' + filename);
         
         // We found the file. Load the contents
-        if ( fileObject && !fileObject.isFolder && fileObject.read ) {
-          bytes = fileObject.contents
+        if (fileObject && !fileObject.isFolder && fileObject.read) {
+          bytes = fileObject.contents;
         } else {
           return 0;
         }
@@ -2138,7 +2133,7 @@ var LibrarySDL = {
     return -1;
   },
 
-  SDL_SetGammaRamp: function (redTable, greenTable, blueTable) {
+  SDL_SetGammaRamp: function(redTable, greenTable, blueTable) {
     return -1;
   },
 

@@ -156,6 +156,15 @@ function SAFE_HEAP_COPY_HISTORY(dest, src) {
   SAFE_HEAP_ACCESS(dest, HEAP_HISTORY[dest] || null, true, false);
 }
 
+function SAFE_HEAP_FILL_HISTORY(from, to, type) {
+#if SAFE_HEAP_LOG
+  Module.print('SAFE_HEAP fill: ' + [from, to, type]);
+#endif
+  for (var i = from; i < to; i++) {
+    HEAP_HISTORY[i] = type;
+  }
+}
+
 //==========================================
 #endif
 
@@ -232,6 +241,7 @@ var setjmpLabels = {};
 #endif
 
 var ABORT = false; // whether we are quitting the application. no code should run after this. set in exit() and abort()
+var EXITSTATUS = 0;
 
 var undef = 0;
 // tempInt is used for 32-bit signed values or smaller. tempBigInt is used
@@ -705,37 +715,74 @@ function callRuntimeCallbacks(callbacks) {
   }
 }
 
-var __ATINIT__ = []; // functions called during startup
-var __ATMAIN__ = []; // functions called when main() is to be run
-var __ATEXIT__ = []; // functions called during shutdown
+var __ATPRERUN__  = []; // functions called before the runtime is initialized
+var __ATINIT__    = []; // functions called during startup
+var __ATMAIN__    = []; // functions called when main() is to be run
+var __ATEXIT__    = []; // functions called during shutdown
+var __ATPOSTRUN__ = []; // functions called after the runtime has exited
 
 var runtimeInitialized = false;
+
+function preRun() {
+  // compatibility - merge in anything from Module['preRun'] at this time
+  if (Module['preRun']) {
+    if (typeof Module['preRun'] == 'function') Module['preRun'] = [Module['preRun']];
+    while (Module['preRun'].length) {
+      addOnPreRun(Module['preRun'].shift());
+    }
+  }
+  callRuntimeCallbacks(__ATPRERUN__);
+}
 
 function ensureInitRuntime() {
   if (runtimeInitialized) return;
   runtimeInitialized = true;
   callRuntimeCallbacks(__ATINIT__);
 }
+
 function preMain() {
   callRuntimeCallbacks(__ATMAIN__);
 }
+
 function exitRuntime() {
   callRuntimeCallbacks(__ATEXIT__);
 }
 
-Module['addOnInit'] = Module.addOnInit = function addOnInit(cb) {
+function postRun() {
+  // compatibility - merge in anything from Module['postRun'] at this time
+  if (Module['postRun']) {
+    if (typeof Module['postRun'] == 'function') Module['postRun'] = [Module['postRun']];
+    while (Module['postRun'].length) {
+      addOnPostRun(Module['postRun'].shift());
+    }
+  }
+  callRuntimeCallbacks(__ATPOSTRUN__);
+}
+
+function addOnPreRun(cb) {
+  __ATPRERUN__.unshift(cb);
+}
+Module['addOnPreRun'] = Module.addOnPreRun = addOnPreRun;
+
+function addOnInit(cb) {
   __ATINIT__.unshift(cb);
-};
+}
+Module['addOnInit'] = Module.addOnInit = addOnInit;
 
-Module['addOnPreMain'] = Module.addOnPreMain = function addOnPreMain(cb) {
+function addOnPreMain(cb) {
   __ATMAIN__.unshift(cb);
-};
+}
+Module['addOnPreMain'] = Module.addOnPreMain = addOnPreMain;
 
-Module['addOnExit'] = Module.addOnExit = function addOnExit(cb) {
+function addOnExit(cb) {
   __ATEXIT__.unshift(cb);
-};
+}
+Module['addOnExit'] = Module.addOnExit = addOnExit;
 
-// TODO add onprerun, onpostrun
+function addOnPostRun(cb) {
+  __ATPOSTRUN__.unshift(cb);
+}
+Module['addOnPostRun'] = Module.addOnPostRun = addOnPostRun;
 
 // Tools
 
@@ -806,6 +853,13 @@ Math['imul'] = function(a, b) {
 #endif
 Math.imul = Math['imul'];
 
+#if TO_FLOAT32
+if (!Math['toFloat32']) Math['toFloat32'] = function(x) {
+  return x;
+};
+Math.toFloat32 = Math['toFloat32'];
+#endif
+
 // A counter of dependencies for calling run(). If we need to
 // do asynchronous work before running, increment this and
 // decrement it. Incrementing must happen in a place like
@@ -873,12 +927,6 @@ Module['removeRunDependency'] = removeRunDependency;
 Module["preloadedImages"] = {}; // maps url to image data
 Module["preloadedAudios"] = {}; // maps url to audio data
 
-function addPreRun(func) {
-  if (!Module['preRun']) Module['preRun'] = [];
-  else if (typeof Module['preRun'] == 'function') Module['preRun'] = [Module['preRun']];
-  Module['preRun'].push(func);
-}
-
 #if PGO
 var PGOMonitor = {
   called: {},
@@ -893,7 +941,7 @@ var PGOMonitor = {
 };
 Module['PGOMonitor'] = PGOMonitor;
 __ATEXIT__.push({ func: function() { PGOMonitor.dump() } });
-addPreRun(function() { addRunDependency('pgo') });
+addOnPreRun(function() { addRunDependency('pgo') });
 #endif
 
 function loadMemoryInitializer(filename) {
@@ -906,7 +954,7 @@ function loadMemoryInitializer(filename) {
   }
 
   // always do this asynchronously, to keep shell and web as similar as possible
-  addPreRun(function() {
+  addOnPreRun(function() {
     if (ENVIRONMENT_IS_NODE || ENVIRONMENT_IS_SHELL) {
       applyData(Module['readBinary'](filename));
     } else {
