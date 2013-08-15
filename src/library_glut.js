@@ -275,7 +275,7 @@ var LibraryGLUT = {
     
     Browser.resizeListeners.push(function(width, height) {
       if (GLUT.reshapeFunc) {
-      	Runtime.dynCall('vii', GLUT.reshapeFunc, [width, height]);
+        Runtime.dynCall('vii', GLUT.reshapeFunc, [width, height]);
       }
     });
 
@@ -424,6 +424,7 @@ var LibraryGLUT = {
   },
 
   glutInitDisplayMode: function(mode) {},
+  glutInitDisplayString: function(modestr) {},
   glutSwapBuffers: function() {},
 
   glutPostRedisplay: function() {

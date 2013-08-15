@@ -318,7 +318,7 @@ var LibrarySDL = {
         usePageCanvas: usePageCanvas,
         source: source,
 
-        isFlagSet: function(flag) {
+        isFlagSet: function (flag) {
           return flags & flag;
         }
       };
@@ -1301,27 +1301,27 @@ var LibrarySDL = {
         };
       }
 
-      var rwops = SDL.rwops[rwopsID];
-      if (rwops === undefined) {
-        return 0;
-      }
+    var rwops = SDL.rwops[rwopsID];
+    if (rwops === undefined) {
+      return 0;
+    }
 
-      var filename = rwops.filename;
-      if (filename === undefined) {
+    var filename = rwops.filename;
+    if (filename === undefined) {
 #if STB_IMAGE
         var raw = callStbImage('stbi_load_from_memory', [rwops.bytes, rwops.count]);
         if (!raw) return 0;
 #else
         Runtime.warnOnce('Only file names that have been preloaded are supported for IMG_Load_RW. Consider using STB_IMAGE=1 if you want synchronous image decoding (see settings.js)');
-        return 0;
+      return 0;
 #endif
-      }
-
+    }
+    
       if (!raw) {
         filename = PATH.resolve(filename);
-        var raw = Module["preloadedImages"][filename];
-        if (!raw) {
-          if (raw === null) Module.printErr('Trying to reuse preloaded image, but freePreloadedMediaOnUse is set!');
+    var raw = Module["preloadedImages"][filename];
+    if (!raw) {
+      if (raw === null) Module.printErr('Trying to reuse preloaded image, but freePreloadedMediaOnUse is set!');
 #if STB_IMAGE
           var name = Module['_malloc'](filename.length+1);
           writeStringToMemory(filename, name);
@@ -1331,20 +1331,20 @@ var LibrarySDL = {
           var raw = callStbImage('stbi_load', [name]);
           if (!raw) return 0;
 #else
-          Runtime.warnOnce('Cannot find preloaded image ' + filename);
+      Runtime.warnOnce('Cannot find preloaded image ' + filename);
           Runtime.warnOnce('Cannot find preloaded image ' + filename + '. Consider using STB_IMAGE=1 if you want synchronous image decoding (see settings.js)');
-          return 0;
+      return 0;
 #endif
         } else if (Module['freePreloadedMediaOnUse']) {
-          Module["preloadedImages"][filename] = null;
-        }
+      Module["preloadedImages"][filename] = null;
+    }
       }
 
-      var surf = SDL.makeSurface(raw.width, raw.height, 0, false, 'load:' + filename);
-      var surfData = SDL.surfaces[surf];
-      surfData.ctx.globalCompositeOperation = "copy";
+    var surf = SDL.makeSurface(raw.width, raw.height, 0, false, 'load:' + filename);
+    var surfData = SDL.surfaces[surf];
+    surfData.ctx.globalCompositeOperation = "copy";
       if (!raw.rawData) {
-        surfData.ctx.drawImage(raw, 0, 0, raw.width, raw.height, 0, 0, raw.width, raw.height);
+    surfData.ctx.drawImage(raw, 0, 0, raw.width, raw.height, 0, 0, raw.width, raw.height);
       } else {
         var imageData = surfData.ctx.getImageData(0, 0, surfData.width, surfData.height);
         if (raw.bpp == 4) {
@@ -1366,18 +1366,18 @@ var LibrarySDL = {
         }
         surfData.ctx.putImageData(imageData, 0, 0);
       }
-      surfData.ctx.globalCompositeOperation = "source-over";
-      // XXX SDL does not specify that loaded images must have available pixel data, in fact
-      //     there are cases where you just want to blit them, so you just need the hardware
-      //     accelerated version. However, code everywhere seems to assume that the pixels
-      //     are in fact available, so we retrieve it here. This does add overhead though.
-      _SDL_LockSurface(surf);
-      surfData.locked--; // The surface is not actually locked in this hack
-      if (SDL.GL) {
-        // After getting the pixel data, we can free the canvas and context if we do not need to do 2D canvas blitting
-        surfData.canvas = surfData.ctx = null;
-      }
-      return surf;
+    surfData.ctx.globalCompositeOperation = "source-over";
+    // XXX SDL does not specify that loaded images must have available pixel data, in fact
+    //     there are cases where you just want to blit them, so you just need the hardware
+    //     accelerated version. However, code everywhere seems to assume that the pixels
+    //     are in fact available, so we retrieve it here. This does add overhead though.
+    _SDL_LockSurface(surf);
+    surfData.locked--; // The surface is not actually locked in this hack
+    if (SDL.GL) {
+      // After getting the pixel data, we can free the canvas and context if we do not need to do 2D canvas blitting
+      surfData.canvas = surfData.ctx = null;
+    }
+    return surf;
     } finally {
       cleanup();
     }
@@ -2066,9 +2066,9 @@ var LibrarySDL = {
     console.log('TODO: SDL_GL_SetAttribute');
   },
 
-  SDL_GL_GetProcAddress__deps: ['$GLEmulation'],
+  SDL_GL_GetProcAddress__deps: ['$GL'],
   SDL_GL_GetProcAddress: function(name_) {
-    return GLEmulation.getProcAddress(Pointer_stringify(name_));
+    return GL.getProcAddress(Pointer_stringify(name_));
   },
 
   SDL_GL_SwapBuffers: function() {},
@@ -2133,7 +2133,7 @@ var LibrarySDL = {
     return -1;
   },
 
-  SDL_SetGammaRamp: function(redTable, greenTable, blueTable) {
+  SDL_SetGammaRamp: function (redTable, greenTable, blueTable) {
     return -1;
   },
 
