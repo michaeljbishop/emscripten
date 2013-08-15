@@ -100,7 +100,7 @@ LibraryManager.library = {
     }
     var entries;
     try {
-      entries = FS.readdir(stream);
+      entries = FS.readdir(stream.path);
     } catch (e) {
       return FS.handleFSError(e);
     }
@@ -478,8 +478,6 @@ LibraryManager.library = {
   open: function(path, oflag, varargs) {
     // int open(const char *path, int oflag, ...);
     // http://pubs.opengroup.org/onlinepubs/009695399/functions/open.html
-    // NOTE: This implementation tries to mimic glibc rather than strictly
-    // following the POSIX standard.
     var mode = {{{ makeGetValue('varargs', 0, 'i32') }}};
     path = Pointer_stringify(path);
     try {
@@ -1413,9 +1411,16 @@ LibraryManager.library = {
     // http://pubs.opengroup.org/onlinepubs/000095399/functions/usleep.html
     // We're single-threaded, so use a busy loop. Super-ugly.
     var msec = useconds / 1000;
-    var start = Date.now();
-    while (Date.now() - start < msec) {
-      // Do nothing.
+    if (ENVIRONMENT_IS_WEB && window['performance'] && window['performance']['now']) {
+      var start = window['performance']['now']();
+      while (window['performance']['now']() - start < msec) {
+        // Do nothing.
+      }
+    } else {
+      var start = Date.now();
+      while (Date.now() - start < msec) {
+        // Do nothing.
+      }
     }
     return 0;
   },

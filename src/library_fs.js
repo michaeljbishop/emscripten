@@ -35,7 +35,7 @@ mergeInto(LibraryManager.library, {
           break;
         }
       }
-      this.message = ERRNO_MESSAGES[errno];
+      this.message = ERRNO_MESSAGES[errno] + ' : ' + new Error().stack;
     },
 
     handleFSError: function(e) {
@@ -51,7 +51,7 @@ mergeInto(LibraryManager.library, {
       for (var i = 0; i < name.length; i++) {
         hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
       }
-      return (parentid + hash) % FS.name_table.length;
+      return ((parentid + hash) >>> 0) % FS.name_table.length;
     },
     hashAddNode: function(node) {
       var hash = FS.hashName(node.parent.id, node.name);
@@ -730,6 +730,9 @@ mergeInto(LibraryManager.library, {
       });
       // use a custom read function
       stream_ops.read = function(stream, buffer, offset, length, position) {
+        if (!FS.forceLoadFile(node)) {
+          throw new FS.ErrnoError(ERRNO_CODES.EIO);
+        }
         var contents = stream.node.contents;
         var size = Math.min(contents.length - position, length);
         if (contents.slice) { // normal array
@@ -1035,7 +1038,7 @@ mergeInto(LibraryManager.library, {
       FS.hashRemoveNode(old_node);
       // do the underlying fs rename
       try {
-        old_node.node_ops.rename(old_node, new_dir, new_name);
+        old_dir.node_ops.rename(old_node, new_dir, new_name);
       } catch (e) {
         throw e;
       } finally {
@@ -1061,6 +1064,14 @@ mergeInto(LibraryManager.library, {
       }
       parent.node_ops.rmdir(parent, name);
       FS.destroyNode(node);
+    },
+    readdir: function(path) {
+      var lookup = FS.lookupPath(path, { follow: true });
+      var node = lookup.node;
+      if (!node.node_ops.readdir) {
+        throw new FS.ErrnoError(ERRNO_CODES.ENOTDIR);
+      }
+      return node.node_ops.readdir(node);
     },
     unlink: function(path) {
       var lookup = FS.lookupPath(path, { parent: true });
@@ -1202,6 +1213,7 @@ mergeInto(LibraryManager.library, {
     open: function(path, flags, mode, fd_start, fd_end) {
       path = PATH.normalize(path);
       flags = typeof flags === 'string' ? FS.modeStringToFlags(flags) : flags;
+      mode = typeof mode === 'undefined' ? 0666 : mode;
       if ((flags & {{{ cDefine('O_CREAT') }}})) {
         mode = (mode & {{{ cDefine('S_IALLUGO') }}}) | {{{ cDefine('S_IFREG') }}};
       } else {
@@ -1279,12 +1291,6 @@ mergeInto(LibraryManager.library, {
         throw new FS.ErrnoError(ERRNO_CODES.ESPIPE);
       }
       return stream.stream_ops.llseek(stream, offset, whence);
-    },
-    readdir: function(stream) {
-      if (!stream.stream_ops.readdir) {
-        throw new FS.ErrnoError(ERRNO_CODES.ENOTDIR);
-      }
-      return stream.stream_ops.readdir(stream);
     },
     read: function(stream, buffer, offset, length, position) {
       if (length < 0 || position < 0) {
@@ -1365,3 +1371,4 @@ mergeInto(LibraryManager.library, {
     }
   }
 });
+

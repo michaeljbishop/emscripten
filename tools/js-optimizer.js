@@ -801,7 +801,10 @@ function simplifyExpressions(ast) {
 //  HEAP[x >> 2]
 // very often. We can in some cases do the shift on the variable itself when it is set,
 // to greatly reduce the number of shift operations.
-// TODO: when shifting a variable, if there are other uses, keep an unshifted version too, to prevent slowdowns?
+// XXX this optimization is deprecated and currently invalid: does not handle overflows
+//     or non-aligned (round numbers, x >> 2 is a multiple of 4). Both are ok to assume
+//     for pointers (undefined behavior otherwise), but invalid in general, and we do
+//     no sufficiently-well distinguish the cases.
 function optimizeShiftsInternal(ast, conservative) {
   var MAX_SHIFTS = 3;
   traverseGeneratedFunctions(ast, function(fun) {
@@ -3001,7 +3004,7 @@ function outline(ast) {
 
   // Try to flatten out code as much as possible, to make outlining more feasible.
   function flatten(func, asmData) {
-    var minSize = sizeToOutline;
+    var minSize = extraInfo.sizeToOutline/4;
     var helperId = 0;
     function getHelper() {
       while (1) {
@@ -3475,6 +3478,9 @@ function outline(ast) {
         }
       }
     }
+    function done() {
+      return asmData.splitCounter >= asmData.maxOutlinings || measureSize(func) <= extraInfo.sizeToOutline;
+    }
     while (1) {
       i--;
       calcMinIndex(); // TODO: optimize
@@ -3530,7 +3536,7 @@ function outline(ast) {
         if (ret.length > pre) {
           // we outlined recursively, reset our state here
           //printErr('successful outline in recursion ' + func[1] + ' due to recursive in level ' + level);
-          if (measureSize(func) <= extraInfo.sizeToOutline) break;
+          if (done()) break;
           end = i-1;
           sizeSeen = 0;
           canRestart = true;
@@ -3570,7 +3576,7 @@ function outline(ast) {
         if (newFuncs.length) {
           ret.push.apply(ret, newFuncs);
         }
-        if (measureSize(func) <= extraInfo.sizeToOutline) break;
+        if (done()) break;
         sizeSeen = 0;
         end = i-1;
         canRestart = true;
