@@ -105,11 +105,11 @@ function run(args) {
     postRun();
   }
 
-  if (Module['setStatus']) {
-    Module['setStatus']('Running...');
+  if (Module.setStatus) {
+    Module.setStatus('Running...');
     setTimeout(function() {
       setTimeout(function() {
-        Module['setStatus']('');
+        Module.setStatus('');
       }, 1);
       if (!ABORT) doRun();
     }, 1);

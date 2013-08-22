@@ -26,18 +26,18 @@ mergeInto(LibraryManager.library, {
         Browser.mainLoop.shouldPause = false;
       },
       updateStatus: function() {
-        if (Module['setStatus']) {
+        if (Module.setStatus) {
           var message = Module['statusMessage'] || 'Please wait...';
           var remaining = Browser.mainLoop.remainingBlockers;
           var expected = Browser.mainLoop.expectedBlockers;
           if (remaining) {
             if (remaining < expected) {
-              Module['setStatus'](message + ' (' + (expected - remaining) + '/' + expected + ')');
+              Module.setStatus(message + ' (' + (expected - remaining) + '/' + expected + ')');
             } else {
-              Module['setStatus'](message);
+              Module.setStatus(message);
             }
           } else {
-            Module['setStatus']('');
+            Module.setStatus('');
           }
         }
       }
