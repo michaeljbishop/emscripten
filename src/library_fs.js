@@ -813,7 +813,7 @@ mergeInto(LibraryManager.library, {
       });
       FS.mkdev('/dev/null', 0666, FS.makedev(1, 3));
       // setup /dev/tty and /dev/tty1
-      // stderr needs to print output using Module['printErr']
+      // stderr needs to print output using Module.printErr
       // so we register a second tty just for it.
       TTY.register(FS.makedev(5, 0), TTY.default_tty_ops);
       TTY.register(FS.makedev(6, 0), TTY.default_tty1_ops);

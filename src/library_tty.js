@@ -110,7 +110,7 @@ mergeInto(LibraryManager.library, {
     default_tty1_ops: {
       put_char: function(tty, val) {
         if (val === null || val === {{{ charCode('\n') }}}) {
-          Module['printErr'](tty.output.join(''));
+          Module.printErr(tty.output.join(''));
           tty.output = [];
         } else {
           tty.output.push(TTY.utf8.processCChar(val));

@@ -511,7 +511,7 @@ function JSify(data, functionsOnly, givenFunctions) {
           if (VERBOSE || WARN_ON_UNDEFINED_SYMBOLS) printErr('warning: unresolved symbol: ' + shortident);
           if (ASM_JS || item.ident in DEAD_FUNCTIONS) {
             // emit a stub that will fail during runtime. this allows asm validation to succeed.
-            LibraryManager.library[shortident] = new Function("Module['printErr']('missing function: " + shortident + "'); abort(-1);");
+            LibraryManager.library[shortident] = new Function("Module.printErr('missing function: " + shortident + "'); abort(-1);");
           } else {
             cancel = true; // emit nothing, not even  var X = undefined;
           }
