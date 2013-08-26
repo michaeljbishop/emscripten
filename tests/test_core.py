@@ -5567,7 +5567,6 @@ The current type of b is: 9
     if Settings.ASM_JS: return self.skip('TODO: dlopen in asm')
 
     Settings.NAMED_GLOBALS = 1
-    Settings.LINKABLE = 1
 
     lib_src = '''
       #include <cstdio>
@@ -6762,6 +6761,7 @@ date: 18.07.2013w; day 18, month  7, year 2013, extra: 201, 3
   def test_files(self):
     if self.emcc_args is not None and '-O2' in self.emcc_args:
       self.emcc_args += ['--closure', '1'] # Use closure here, to test we don't break FS stuff
+      self.emcc_args = filter(lambda x: x != '-g', self.emcc_args) # ensure we test --closure 1 --memory-init-file 1 (-g would disable closure)
 
     Settings.CORRECT_SIGNS = 1 # Just so our output is what we expect. Can flip them both.
     post = '''
@@ -6788,8 +6788,13 @@ def process(filename):
     other.close()
 
     src = open(path_from_root('tests', 'files.cpp'), 'r').read()
+
+    mem_file = 'src.cpp.o.js.mem'
+    try_delete(mem_file)
     self.do_run(src, ('size: 7\ndata: 100,-56,50,25,10,77,123\nloop: 100 -56 50 25 10 77 123 \ninput:hi there!\ntexto\n$\n5 : 10,30,20,11,88\nother=some data.\nseeked=me da.\nseeked=ata.\nseeked=ta.\nfscanfed: 10 - hello\nok.\ntexte\n', 'size: 7\ndata: 100,-56,50,25,10,77,123\nloop: 100 -56 50 25 10 77 123 \ninput:hi there!\ntexto\ntexte\n$\n5 : 10,30,20,11,88\nother=some data.\nseeked=me da.\nseeked=ata.\nseeked=ta.\nfscanfed: 10 - hello\nok.\n'),
                  post_build=post, extra_emscripten_args=['-H', 'libc/fcntl.h'])
+    if self.emcc_args and '--memory-init-file' in self.emcc_args:
+      assert os.path.exists(mem_file)
 
   def test_files_m(self):
     # Test for Module.stdin etc.
@@ -8322,13 +8327,15 @@ def process(filename):
     shutil.copyfile(path_from_root('tests', 'freetype', 'LiberationSansBold.ttf'), os.path.join(self.get_dir(), 'font.ttf'))
 
     # Main
-    self.do_run(open(path_from_root('tests', 'freetype', 'main.c'), 'r').read(),
-                 open(path_from_root('tests', 'freetype', 'ref.txt'), 'r').read(),
-                 ['font.ttf', 'test!', '150', '120', '25'],
-                 libraries=self.get_freetype(),
-                 includes=[path_from_root('tests', 'freetype', 'include')],
-                 post_build=post)
-                 #build_ll_hook=self.do_autodebug)
+    for outlining in [0, 5000]:
+      Settings.OUTLINING_LIMIT = outlining
+      print >> sys.stderr, 'outlining:', outlining
+      self.do_run(open(path_from_root('tests', 'freetype', 'main.c'), 'r').read(),
+                   open(path_from_root('tests', 'freetype', 'ref.txt'), 'r').read(),
+                   ['font.ttf', 'test!', '150', '120', '25'],
+                   libraries=self.get_freetype(),
+                   includes=[path_from_root('tests', 'freetype', 'include')],
+                   post_build=post)
 
     # github issue 324
     print '[issue 324]'
