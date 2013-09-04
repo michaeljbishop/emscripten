@@ -5580,11 +5580,53 @@ The current type of b is: 9
     Settings.RUNTIME_LINKED_LIBS = ['liblib.so'];
     self.do_run(main, 'supp: 54,2\nmain: 56\nsupp see: 543\nmain see: 76\nok.')
 
+  def can_dlfcn(self):
+    if self.emcc_args and '--memory-init-file' in self.emcc_args:
+      for i in range(len(self.emcc_args)):
+        if self.emcc_args[i] == '--memory-init-file':
+          self.emcc_args = self.emcc_args[:i] + self.emcc_args[i+2:]
+          break
+
+    if Settings.ASM_JS:
+      Settings.DLOPEN_SUPPORT = 1
+    else:
+      Settings.NAMED_GLOBALS = 1
+
+    if not self.is_le32():
+      self.skip('need le32 for dlfcn support')
+      return False
+    else:
+      return True
+
+  def prep_dlfcn_lib(self):
+    if Settings.ASM_JS:
+      Settings.MAIN_MODULE = 0
+      Settings.SIDE_MODULE = 1
+    else:
+      Settings.BUILD_AS_SHARED_LIB = 1
+      Settings.INCLUDE_FULL_LIBRARY = 0
+
+  def prep_dlfcn_main(self):
+    if Settings.ASM_JS:
+      Settings.MAIN_MODULE = 1
+      Settings.SIDE_MODULE = 0
+    else:
+      Settings.BUILD_AS_SHARED_LIB = 0
+      Settings.INCLUDE_FULL_LIBRARY = 1
+
+  dlfcn_post_build = '''
+def process(filename):
+  src = open(filename, 'r').read().replace(
+    '// {{PRE_RUN_ADDITIONS}}',
+    "FS.createLazyFile('/', 'liblib.so', 'liblib.so', true, false);"
+  )
+  open(filename, 'w').write(src)
+'''
+
   def test_dlfcn_basic(self):
-    if Settings.ASM_JS: return self.skip('TODO: dlopen in asm')
+    if not self.can_dlfcn(): return
 
-    Settings.NAMED_GLOBALS = 1
-
+    self.prep_dlfcn_lib()
     lib_src = '''
       #include <cstdio>
 
@@ -5599,10 +5641,10 @@ The current type of b is: 9
       '''
     dirname = self.get_dir()
     filename = os.path.join(dirname, 'liblib.cpp')
-    Settings.BUILD_AS_SHARED_LIB = 1
     self.build(lib_src, dirname, filename)
     shutil.move(filename + '.o.js', os.path.join(dirname, 'liblib.so'))
 
+    self.prep_dlfcn_main()
     src = '''
       #include <cstdio>
       #include <dlfcn.h>
@@ -5621,28 +5663,17 @@ The current type of b is: 9
         return 0;
       }
       '''
-    Settings.BUILD_AS_SHARED_LIB = 0
-    add_pre_run_and_checks = '''
-def process(filename):
-  src = open(filename, 'r').read().replace(
-    '// {{PRE_RUN_ADDITIONS}}',
-    "FS.createLazyFile('/', 'liblib.so', 'liblib.so', true, false);"
-  )
-  open(filename, 'w').write(src)
-'''
     self.do_run(src, 'Constructing main object.\nConstructing lib object.\n',
-                post_build=add_pre_run_and_checks)
+                post_build=self.dlfcn_post_build)
 
   def test_dlfcn_qsort(self):
-    if self.emcc_args is None: return self.skip('requires emcc')
-    if Settings.ASM_JS: return self.skip('TODO: dlopen in asm')
-
-    Settings.LINKABLE = 1
-    Settings.NAMED_GLOBALS = 1
+    if not self.can_dlfcn(): return
 
     if Settings.USE_TYPED_ARRAYS == 2:
       Settings.CORRECT_SIGNS = 1 # Needed for unsafe optimizations
 
+    self.prep_dlfcn_lib()
+    Settings.EXPORTED_FUNCTIONS = ['_get_cmp']
     lib_src = '''
       int lib_cmp(const void* left, const void* right) {
         const int* a = (const int*) left;
@@ -5660,11 +5691,11 @@ def process(filename):
       '''
     dirname = self.get_dir()
     filename = os.path.join(dirname, 'liblib.cpp')
-    Settings.BUILD_AS_SHARED_LIB = 1
-    Settings.EXPORTED_FUNCTIONS = ['_get_cmp']
     self.build(lib_src, dirname, filename)
     shutil.move(filename + '.o.js', os.path.join(dirname, 'liblib.so'))
 
+    self.prep_dlfcn_main()
+    Settings.EXPORTED_FUNCTIONS = ['_main', '_malloc']
     src = '''
       #include <stdio.h>
       #include <stdlib.h>
@@ -5686,6 +5717,13 @@ def process(filename):
         CMP_TYPE lib_cmp_ptr;
         int arr[5] = {4, 2, 5, 1, 3};
 
+        qsort((void*)arr, 5, sizeof(int), main_cmp);
+        printf("Sort with main comparison: ");
+        for (int i = 0; i < 5; i++) {
+          printf("%d ", arr[i]);
+        }
+        printf("\\n");
+
         lib_handle = dlopen("liblib.so", RTLD_NOW);
         if (lib_handle == NULL) {
           printf("Could not load lib.\\n");
@@ -5697,14 +5735,6 @@ def process(filename):
           return 1;
         }
         lib_cmp_ptr = getter_ptr();
-
-        qsort((void*)arr, 5, sizeof(int), main_cmp);
-        printf("Sort with main comparison: ");
-        for (int i = 0; i < 5; i++) {
-          printf("%d ", arr[i]);
-        }
-        printf("\\n");
-
         qsort((void*)arr, 5, sizeof(int), lib_cmp_ptr);
         printf("Sort with lib comparison: ");
         for (int i = 0; i < 5; i++) {
@@ -5715,27 +5745,22 @@ def process(filename):
         return 0;
       }
       '''
-    Settings.BUILD_AS_SHARED_LIB = 0
-    Settings.EXPORTED_FUNCTIONS = ['_main']
-    add_pre_run_and_checks = '''
-def process(filename):
-  src = open(filename, 'r').read().replace(
-    '// {{PRE_RUN_ADDITIONS}}',
-    "FS.createLazyFile('/', 'liblib.so', 'liblib.so', true, false);"
-  )
-  open(filename, 'w').write(src)
-'''
     self.do_run(src, 'Sort with main comparison: 5 4 3 2 1 *Sort with lib comparison: 1 2 3 4 5 *',
                 output_nicerizer=lambda x, err: x.replace('\n', '*'),
-                post_build=add_pre_run_and_checks)
+                post_build=self.dlfcn_post_build)
+
+    if Settings.ASM_JS and os.path.exists(SPIDERMONKEY_ENGINE[0]):
+      out = run_js('liblib.so', engine=SPIDERMONKEY_ENGINE, full_output=True, stderr=STDOUT)
+      assert 'asm' in out
+      self.validate_asmjs(out)
 
   def test_dlfcn_data_and_fptr(self):
-    if Settings.ASM_JS: return self.skip('TODO: dlopen in asm')
+    if Settings.ASM_JS: return self.skip('this is not a valid case - libraries should not be able to access their parents globals willy nilly')
+    if not self.can_dlfcn(): return
+
     if Building.LLVM_OPTS: return self.skip('LLVM opts will optimize out parent_func')
 
-    Settings.LINKABLE = 1
-    Settings.NAMED_GLOBALS = 1
-
+    self.prep_dlfcn_lib()
     lib_src = '''
       #include <stdio.h>
 
@@ -5760,21 +5785,23 @@ def process(filename):
       '''
     dirname = self.get_dir()
     filename = os.path.join(dirname, 'liblib.cpp')
-    Settings.BUILD_AS_SHARED_LIB = 1
     Settings.EXPORTED_FUNCTIONS = ['_func']
     Settings.EXPORTED_GLOBALS = ['_global']
     self.build(lib_src, dirname, filename)
     shutil.move(filename + '.o.js', os.path.join(dirname, 'liblib.so'))
 
+    self.prep_dlfcn_main()
+    Settings.LINKABLE = 1
     src = '''
       #include <stdio.h>
       #include <dlfcn.h>
+      #include <emscripten.h>
 
       typedef void (*FUNCTYPE(int, void(*)()))();
 
       FUNCTYPE func;
 
-      void parent_func() {
+      void EMSCRIPTEN_KEEPALIVE parent_func() {
         printf("parent_func called from child\\n");
       }
 
@@ -5818,23 +5845,14 @@ def process(filename):
         return 0;
       }
       '''
-    Settings.BUILD_AS_SHARED_LIB = 0
     Settings.EXPORTED_FUNCTIONS = ['_main']
     Settings.EXPORTED_GLOBALS = []
-    add_pre_run_and_checks = '''
-def process(filename):
-  src = open(filename, 'r').read().replace(
-    '// {{PRE_RUN_ADDITIONS}}',
-    "FS.createLazyFile('/', 'liblib.so', 'liblib.so', true, false);"
-  )
-  open(filename, 'w').write(src)
-'''
     self.do_run(src, 'In func: 13*First calling main_fptr from lib.*Second calling lib_fptr from main.*parent_func called from child*parent_func called from child*Var: 42*',
                  output_nicerizer=lambda x, err: x.replace('\n', '*'),
-                 post_build=add_pre_run_and_checks)
+                 post_build=self.dlfcn_post_build)
 
   def test_dlfcn_alias(self):
-    if Settings.ASM_JS: return self.skip('TODO: dlopen in asm')
+    if Settings.ASM_JS: return self.skip('this is not a valid case - libraries should not be able to access their parents globals willy nilly')
 
     Settings.LINKABLE = 1
     Settings.NAMED_GLOBALS = 1
@@ -5876,29 +5894,23 @@ def process(filename):
     Settings.BUILD_AS_SHARED_LIB = 0
     Settings.INCLUDE_FULL_LIBRARY = 1
     Settings.EXPORTED_FUNCTIONS = ['_main']
-    add_pre_run_and_checks = '''
-def process(filename):
-  src = open(filename, 'r').read().replace(
-    '// {{PRE_RUN_ADDITIONS}}',
-    "FS.createLazyFile('/', 'liblib.so', 'liblib.so', true, false);"
-  )
-  open(filename, 'w').write(src)
-'''
     self.do_run(src, 'Parent global: 123.*Parent global: 456.*',
                 output_nicerizer=lambda x, err: x.replace('\n', '*'),
-                post_build=add_pre_run_and_checks,
+                post_build=self.dlfcn_post_build,
                 extra_emscripten_args=['-H', 'libc/fcntl.h,libc/sys/unistd.h,poll.h,libc/math.h,libc/time.h,libc/langinfo.h'])
     Settings.INCLUDE_FULL_LIBRARY = 0
 
   def test_dlfcn_varargs(self):
-    if Settings.ASM_JS: return self.skip('TODO: dlopen in asm')
+    if Settings.ASM_JS: return self.skip('this is not a valid case - libraries should not be able to access their parents globals willy nilly')
+
+    if not self.can_dlfcn(): return
 
     Settings.LINKABLE = 1
-    Settings.NAMED_GLOBALS = 1
 
     if Building.LLVM_OPTS == 2: return self.skip('LLVM LTO will optimize things that prevent shared objects from working')
     if Settings.QUANTUM_SIZE == 1: return self.skip('FIXME: Add support for this')
 
+    self.prep_dlfcn_lib()
     lib_src = r'''
       void print_ints(int n, ...);
       extern "C" void func() {
@@ -5907,15 +5919,16 @@ def process(filename):
       '''
     dirname = self.get_dir()
     filename = os.path.join(dirname, 'liblib.cpp')
-    Settings.BUILD_AS_SHARED_LIB = 1
     Settings.EXPORTED_FUNCTIONS = ['_func']
     self.build(lib_src, dirname, filename)
     shutil.move(filename + '.o.js', os.path.join(dirname, 'liblib.so'))
 
+    self.prep_dlfcn_main()
     src = r'''
       #include <stdarg.h>
       #include <stdio.h>
       #include <dlfcn.h>
+      #include <assert.h>
 
       void print_ints(int n, ...) {
         va_list args;
@@ -5933,24 +5946,16 @@ def process(filename):
         print_ints(2, 100, 200);
 
         lib_handle = dlopen("liblib.so", RTLD_NOW);
+        assert(lib_handle);
         fptr = (void (*)())dlsym(lib_handle, "func");
         fptr();
 
         return 0;
       }
       '''
-    Settings.BUILD_AS_SHARED_LIB = 0
     Settings.EXPORTED_FUNCTIONS = ['_main']
-    add_pre_run_and_checks = '''
-def process(filename):
-  src = open(filename, 'r').read().replace(
-    '// {{PRE_RUN_ADDITIONS}}',
-    "FS.createLazyFile('/', 'liblib.so', 'liblib.so', true, false);"
-  )
-  open(filename, 'w').write(src)
-'''
     self.do_run(src, '100\n200\n13\n42\n',
-                post_build=add_pre_run_and_checks)
+                post_build=self.dlfcn_post_build)
 
   def test_dlfcn_self(self):
     if Settings.USE_TYPED_ARRAYS == 1: return self.skip('Does not work with USE_TYPED_ARRAYS=1')
@@ -5959,14 +5964,15 @@ def process(filename):
     src = r'''
 #include <stdio.h>
 #include <dlfcn.h>
+#include <emscripten.h>
 
-int global = 123;
+int EMSCRIPTEN_KEEPALIVE global = 123;
 
-extern "C" __attribute__((noinline)) void foo(int x) {
+extern "C" EMSCRIPTEN_KEEPALIVE void foo(int x) {
 printf("%d\n", x);
 }
 
-extern "C" __attribute__((noinline)) void repeatable() {
+extern "C" EMSCRIPTEN_KEEPALIVE void repeatable() {
 void* self = dlopen(NULL, RTLD_LAZY);
 int* global_ptr = (int*)dlsym(self, "global");
 void (*foo_ptr)(int) = (void (*)(int))dlsym(self, "foo");
@@ -5987,14 +5993,238 @@ return 0;
             break
         else:
           raise Exception('Could not find symbol table!')
-      import json
-      table = json.loads(table[table.find('{'):table.rfind('}')+1])
-      actual = list(sorted(table.keys()))
+      table = table[table.find('{'):table.rfind('}')+1]
       # ensure there aren't too many globals; we don't want unnamed_addr
-      assert actual == ['_foo', '_global', '_main', '_repeatable'], \
-        "Symbol table does not match: %s" % actual
-
+      assert table.count(',') <= 4
     self.do_run(src, '123\n123', post_build=(None, post))
+
+
+  def test_dlfcn_unique_sig(self):
+    if not self.can_dlfcn(): return
+
+    self.prep_dlfcn_lib()
+    lib_src = '''
+      #include <stdio.h>
+
+      int myfunc(int a, int b, int c, int d, int e, int f, int g, int h, int i, int j, int k, int l, int m) {
+        return 13;
+      }
+      '''
+    Settings.EXPORTED_FUNCTIONS = ['_myfunc']
+    dirname = self.get_dir()
+    filename = os.path.join(dirname, 'liblib.c')
+    self.build(lib_src, dirname, filename)
+    shutil.move(filename + '.o.js', os.path.join(dirname, 'liblib.so'))
+
+    self.prep_dlfcn_main()
+    src = '''
+      #include <assert.h>
+      #include <stdio.h>
+      #include <dlfcn.h>
+
+      typedef int (*FUNCTYPE)(int, int, int, int, int, int, int, int, int, int, int, int, int);
+
+      int main() {
+        void *lib_handle;
+        FUNCTYPE func_ptr;
+
+        lib_handle = dlopen("liblib.so", RTLD_NOW);
+        assert(lib_handle != NULL);
+
+        func_ptr = (FUNCTYPE)dlsym(lib_handle, "myfunc");
+        assert(func_ptr != NULL);
+        assert(func_ptr(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) == 13);
+
+        puts("success");
+
+        return 0;
+      }
+      '''
+    Settings.EXPORTED_FUNCTIONS = ['_main', '_malloc']
+    self.do_run(src, 'success', force_c=True, post_build=self.dlfcn_post_build)
+
+  def test_dlfcn_stacks(self):
+    if not self.can_dlfcn(): return
+
+    self.prep_dlfcn_lib()
+    lib_src = '''
+      #include <assert.h>
+      #include <stdio.h>
+      #include <string.h>
+
+      int myfunc(const char *input) {
+        char bigstack[1024] = { 0 };
+
+        // make sure we didn't just trample the stack!
+        assert(!strcmp(input, "foobar"));
+
+        snprintf(bigstack, sizeof(bigstack), input);
+        return strlen(bigstack);
+      }
+      '''
+    Settings.EXPORTED_FUNCTIONS = ['_myfunc']
+    dirname = self.get_dir()
+    filename = os.path.join(dirname, 'liblib.c')
+    self.build(lib_src, dirname, filename)
+    shutil.move(filename + '.o.js', os.path.join(dirname, 'liblib.so'))
+
+    self.prep_dlfcn_main()
+    src = '''
+      #include <assert.h>
+      #include <stdio.h>
+      #include <dlfcn.h>
+
+      typedef int (*FUNCTYPE)(const char *);
+
+      int main() {
+        void *lib_handle;
+        FUNCTYPE func_ptr;
+        char str[128];
+
+        snprintf(str, sizeof(str), "foobar");
+
+        lib_handle = dlopen("liblib.so", RTLD_NOW);
+        assert(lib_handle != NULL);
+
+        func_ptr = (FUNCTYPE)dlsym(lib_handle, "myfunc");
+        assert(func_ptr != NULL);
+        assert(func_ptr(str) == 6);
+
+        puts("success");
+
+        return 0;
+      }
+      '''
+    Settings.EXPORTED_FUNCTIONS = ['_main', '_malloc']
+    self.do_run(src, 'success', force_c=True, post_build=self.dlfcn_post_build)
+
+  def test_dlfcn_funcs(self):
+    if not self.can_dlfcn(): return
+
+    self.prep_dlfcn_lib()
+    lib_src = r'''
+      #include <assert.h>
+      #include <stdio.h>
+      #include <string.h>
+
+      typedef void (*voidfunc)();
+      typedef void (*intfunc)(int);
+
+      void callvoid(voidfunc f) { f(); }
+      void callint(voidfunc f, int x) { f(x); }
+
+      void void_0() { printf("void 0\n"); }
+      void void_1() { printf("void 1\n"); }
+      voidfunc getvoid(int i) {
+        switch(i) {
+          case 0: return void_0;
+          case 1: return void_1;
+          default: return NULL;
+        }
+      }
+
+      void int_0(int x) { printf("int 0 %d\n", x); }
+      void int_1(int x) { printf("int 1 %d\n", x); }
+      intfunc getint(int i) {
+        switch(i) {
+          case 0: return int_0;
+          case 1: return int_1;
+          default: return NULL;
+        }
+      }
+      '''
+    Settings.EXPORTED_FUNCTIONS = ['_callvoid', '_callint', '_getvoid', '_getint']
+    dirname = self.get_dir()
+    filename = os.path.join(dirname, 'liblib.c')
+    self.build(lib_src, dirname, filename)
+    shutil.move(filename + '.o.js', os.path.join(dirname, 'liblib.so'))
+
+    self.prep_dlfcn_main()
+    src = r'''
+      #include <assert.h>
+      #include <stdio.h>
+      #include <dlfcn.h>
+
+      typedef void (*voidfunc)();
+      typedef void (*intfunc)(int);
+
+      typedef void (*voidcaller)(voidfunc);
+      typedef void (*intcaller)(intfunc, int);
+
+      typedef voidfunc (*voidgetter)(int);
+      typedef intfunc (*intgetter)(int);
+
+      void void_main() { printf("main.\n"); }
+      void int_main(int x) { printf("main %d\n", x); }
+
+      int main() {
+        printf("go\n");
+        void *lib_handle;
+        lib_handle = dlopen("liblib.so", RTLD_NOW);
+        assert(lib_handle != NULL);
+
+        voidcaller callvoid = (voidcaller)dlsym(lib_handle, "callvoid");
+        assert(callvoid != NULL);
+        callvoid(void_main);
+
+        intcaller callint = (intcaller)dlsym(lib_handle, "callint");
+        assert(callint != NULL);
+        callint(int_main, 201);
+
+        voidgetter getvoid = (voidgetter)dlsym(lib_handle, "getvoid");
+        assert(getvoid != NULL);
+        callvoid(getvoid(0));
+        callvoid(getvoid(1));
+
+        intgetter getint = (intgetter)dlsym(lib_handle, "getint");
+        assert(getint != NULL);
+        callint(getint(0), 54);
+        callint(getint(1), 9000);
+
+        assert(getint(1000) == NULL);
+
+        puts("ok");
+        return 0;
+      }
+      '''
+    Settings.EXPORTED_FUNCTIONS = ['_main', '_malloc']
+    self.do_run(src, '''go
+main.
+main 201
+void 0
+void 1
+int 0 54
+int 1 9000
+ok
+''', force_c=True, post_build=self.dlfcn_post_build)
+
+  def test_dlfcn_mallocs(self):
+    if not Settings.ASM_JS: return self.skip('needs asm')
+
+    if not self.can_dlfcn(): return
+
+    Settings.TOTAL_MEMORY = 64*1024*1024 # will be exhausted without functional malloc/free
+
+    self.prep_dlfcn_lib()
+    lib_src = r'''
+      #include <assert.h>
+      #include <stdio.h>
+      #include <string.h>
+      #include <stdlib.h>
+
+      void *mallocproxy(int n) { return malloc(n); }
+      void freeproxy(void *p) { free(p); }
+      '''
+    Settings.EXPORTED_FUNCTIONS = ['_mallocproxy', '_freeproxy']
+    dirname = self.get_dir()
+    filename = os.path.join(dirname, 'liblib.c')
+    self.build(lib_src, dirname, filename)
+    shutil.move(filename + '.o.js', os.path.join(dirname, 'liblib.so'))
+
+    self.prep_dlfcn_main()
+    src = open(path_from_root('tests', 'dlmalloc_proxy.c')).read()
+    Settings.EXPORTED_FUNCTIONS = ['_main', '_malloc', '_free']
+    self.do_run(src, '''*294,153*''', force_c=True, post_build=self.dlfcn_post_build)
 
   def test_rand(self):
     return self.skip('rand() is now random') # FIXME
