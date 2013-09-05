@@ -338,6 +338,7 @@ function JSify(data, functionsOnly, givenFunctions) {
           // External variables in shared libraries should not be declared as
           // they would shadow similarly-named globals in the parent, so do nothing here.
           if (BUILD_AS_SHARED_LIB) return ret;
+          if (SIDE_MODULE) return [];
           // Library items need us to emit something, but everything else requires nothing.
           if (!LibraryManager.library[item.ident.slice(1)]) return ret;
         }
@@ -1408,7 +1409,7 @@ function JSify(data, functionsOnly, givenFunctions) {
     var extCall = false;
 
     if (ASM_JS && funcData.setjmpTable) forceByPointer = true; // in asm.js mode, we must do an invoke for each call
-    if (ASM_JS && DLOPEN_SUPPORT && !invoke) extCall = true; // go out, to be able to access other modules TODO: optimize
+    if (ASM_JS && DLOPEN_SUPPORT && !invoke && !funcData.setjmpTable) extCall = true; // go out, to be able to access other modules TODO: optimize
 
     ident = Variables.resolveAliasToIdent(ident);
     var shortident = ident.slice(1);

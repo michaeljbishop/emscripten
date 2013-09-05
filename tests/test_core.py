@@ -5751,8 +5751,8 @@ def process(filename):
 
     if Settings.ASM_JS and os.path.exists(SPIDERMONKEY_ENGINE[0]):
       out = run_js('liblib.so', engine=SPIDERMONKEY_ENGINE, full_output=True, stderr=STDOUT)
-      assert 'asm' in out
-      self.validate_asmjs(out)
+      if 'asm' in out:
+        self.validate_asmjs(out)
 
   def test_dlfcn_data_and_fptr(self):
     if Settings.ASM_JS: return self.skip('this is not a valid case - libraries should not be able to access their parents globals willy nilly')
@@ -6225,6 +6225,139 @@ ok
     src = open(path_from_root('tests', 'dlmalloc_proxy.c')).read()
     Settings.EXPORTED_FUNCTIONS = ['_main', '_malloc', '_free']
     self.do_run(src, '''*294,153*''', force_c=True, post_build=self.dlfcn_post_build)
+
+  def test_dlfcn_longjmp(self):
+    if not self.can_dlfcn(): return
+
+    self.prep_dlfcn_lib()
+    lib_src = r'''
+      #include <setjmp.h>
+
+      void jumpy(jmp_buf buf) {
+        static int i = 0;
+        i++;
+        if (i == 10) longjmp(buf, i);
+        printf("pre %d\n", i);
+      }
+      '''
+    Settings.EXPORTED_FUNCTIONS = ['_jumpy']
+    dirname = self.get_dir()
+    filename = os.path.join(dirname, 'liblib.c')
+    self.build(lib_src, dirname, filename)
+    shutil.move(filename + '.o.js', os.path.join(dirname, 'liblib.so'))
+
+    self.prep_dlfcn_main()
+    src = r'''
+      #include <assert.h>
+      #include <stdio.h>
+      #include <dlfcn.h>
+      #include <setjmp.h>
+
+      typedef void (*jumpfunc)(jmp_buf);
+
+      int main() {
+        printf("go!\n");
+
+        void *lib_handle;
+        lib_handle = dlopen("liblib.so", RTLD_NOW);
+        assert(lib_handle != NULL);
+
+        jumpfunc jumpy = (jumpfunc)dlsym(lib_handle, "jumpy");
+        assert(jumpy);
+
+        jmp_buf buf;
+        int jmpval = setjmp(buf);
+        if (jmpval == 0) {
+          while (1) jumpy(buf);
+        } else {
+          printf("out!\n");
+        }
+
+        return 0;
+      }
+      '''
+    Settings.EXPORTED_FUNCTIONS = ['_main', '_malloc', '_free']
+    self.do_run(src, '''go!
+pre 1
+pre 2
+pre 3
+pre 4
+pre 5
+pre 6
+pre 7
+pre 8
+pre 9
+out!
+''', post_build=self.dlfcn_post_build, force_c=True)
+
+  def zzztest_dlfcn_exceptions(self): # TODO: make this work. need to forward tempRet0 across modules
+    if not self.can_dlfcn(): return
+
+    Settings.DISABLE_EXCEPTION_CATCHING = 0
+
+    self.prep_dlfcn_lib()
+    lib_src = r'''
+      extern "C" {
+      int ok() {
+        return 65;
+      }
+      int fail() {
+        throw 123;
+      }
+      }
+      '''
+    Settings.EXPORTED_FUNCTIONS = ['_ok', '_fail']
+    dirname = self.get_dir()
+    filename = os.path.join(dirname, 'liblib.cpp')
+    self.build(lib_src, dirname, filename)
+    shutil.move(filename + '.o.js', os.path.join(dirname, 'liblib.so'))
+
+    self.prep_dlfcn_main()
+    src = r'''
+      #include <assert.h>
+      #include <stdio.h>
+      #include <dlfcn.h>
+
+      typedef int (*intfunc)();
+
+      int main() {
+        printf("go!\n");
+
+        void *lib_handle;
+        lib_handle = dlopen("liblib.so", RTLD_NOW);
+        assert(lib_handle != NULL);
+
+        intfunc okk = (intfunc)dlsym(lib_handle, "ok");
+        intfunc faill = (intfunc)dlsym(lib_handle, "fail");
+        assert(okk && faill);
+
+        try {
+          printf("ok: %d\n", okk());
+        } catch(...) {
+          printf("wha\n");
+        }
+
+        try {
+          printf("fail: %d\n", faill());
+        } catch(int x) {
+          printf("int %d\n", x);
+        }
+
+        try {
+          printf("fail: %d\n", faill());
+        } catch(double x) {
+          printf("caught %f\n", x);
+        }
+
+        return 0;
+      }
+      '''
+    Settings.EXPORTED_FUNCTIONS = ['_main', '_malloc', '_free']
+    self.do_run(src, '''go!
+ok: 65
+int 123
+ok
+''', post_build=self.dlfcn_post_build)
 
   def test_rand(self):
     return self.skip('rand() is now random') # FIXME
