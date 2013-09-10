@@ -3742,7 +3742,8 @@ def process(filename):
       self.do_run(open(path_from_root('tests', 'emscripten_get_now.cpp')).read(), 'Timer resolution is good.')
 
   def test_inlinejs(self):
-      if Settings.ASM_JS: return self.skip('asm does not support random code, TODO: something that works in asm')
+      if Settings.ASM_JS: Settings.ASM_JS = 2 # skip validation, asm does not support random code
+      if not self.is_le32(): return self.skip('le32 needed for inline js')
       src = r'''
         #include <stdio.h>
 
@@ -3762,7 +3763,8 @@ def process(filename):
       self.do_run(src, 'Inline JS is very cool\n3.64\n')
 
   def test_inlinejs2(self):
-      if Settings.ASM_JS: return self.skip('asm does not support random code, TODO: something that works in asm')
+      if Settings.ASM_JS: Settings.ASM_JS = 2 # skip validation, asm does not support random code
+      if not self.is_le32(): return self.skip('le32 needed for inline js')
       src = r'''
         #include <stdio.h>
 
@@ -3773,8 +3775,8 @@ def process(filename):
         }
 
         void mult() {
-          asm("var $_$1 = Math.abs(-100); $_$1 *= 2;"); // multiline
-          asm __volatile__("Module.print($_$1); Module.print('\n')");
+          asm("var $_$1 = Math.abs(-100); $_$1 *= 2; Module.print($_$1)"); // multiline
+          asm __volatile__("Module.print('done')");
         }
 
         int main(int argc, char **argv) {
@@ -3784,7 +3786,7 @@ def process(filename):
         }
         '''
 
-      self.do_run(src, '4\n200\n')
+      self.do_run(src, '4\n200\ndone\n')
 
   def test_inlinejs3(self):
       if Settings.ASM_JS: return self.skip('asm does not support random code, TODO: something that works in asm')
@@ -7355,7 +7357,7 @@ def process(filename):
       FS.registerDevice(dummy_device, {});
 
       FS.createDataFile('/', 'file', 'abcdef', true, true);
-      FS.mkdev('/device', 0666, dummy_device);
+      FS.mkdev('/device', dummy_device);
     \'\'\'
   )
   open(filename, 'w').write(src)
@@ -7613,32 +7615,18 @@ def process(filename):
       Settings.INCLUDE_FULL_LIBRARY = 0
 
   def test_unistd_access(self):
-    add_pre_run = '''
-def process(filename):
-  import tools.shared as shared
-  src = open(filename, 'r').read().replace(
-    '// {{PRE_RUN_ADDITIONS}}',
-    open(shared.path_from_root('tests', 'unistd', 'access.js'), 'r').read()
-  )
-  open(filename, 'w').write(src)
-'''
+    if Settings.ASM_JS: Settings.ASM_JS = 2 # skip validation, asm does not support random code
+    if not self.is_le32(): return self.skip('le32 needed for inline js')
     src = open(path_from_root('tests', 'unistd', 'access.c'), 'r').read()
     expected = open(path_from_root('tests', 'unistd', 'access.out'), 'r').read()
-    self.do_run(src, expected, post_build=add_pre_run)
+    self.do_run(src, expected)
 
   def test_unistd_curdir(self):
-    add_pre_run = '''
-def process(filename):
-  import tools.shared as shared
-  src = open(filename, 'r').read().replace(
-    '// {{PRE_RUN_ADDITIONS}}',
-    open(shared.path_from_root('tests', 'unistd', 'curdir.js'), 'r').read()
-  )
-  open(filename, 'w').write(src)
-'''
+    if Settings.ASM_JS: Settings.ASM_JS = 2 # skip validation, asm does not support random code
+    if not self.is_le32(): return self.skip('le32 needed for inline js')
     src = open(path_from_root('tests', 'unistd', 'curdir.c'), 'r').read()
     expected = open(path_from_root('tests', 'unistd', 'curdir.out'), 'r').read()
-    self.do_run(src, expected, post_build=add_pre_run)
+    self.do_run(src, expected)
 
   def test_unistd_close(self):
     src = open(path_from_root('tests', 'unistd', 'close.c'), 'r').read()
@@ -7665,18 +7653,11 @@ def process(filename):
     self.do_run(src, expected)
 
   def test_unistd_truncate(self):
-    add_pre_run = '''
-def process(filename):
-  import tools.shared as shared
-  src = open(filename, 'r').read().replace(
-    '// {{PRE_RUN_ADDITIONS}}',
-    open(shared.path_from_root('tests', 'unistd', 'truncate.js'), 'r').read()
-  )
-  open(filename, 'w').write(src)
-'''
+    if Settings.ASM_JS: Settings.ASM_JS = 2 # skip validation, asm does not support random code
+    if not self.is_le32(): return self.skip('le32 needed for inline js')
     src = open(path_from_root('tests', 'unistd', 'truncate.c'), 'r').read()
     expected = open(path_from_root('tests', 'unistd', 'truncate.out'), 'r').read()
-    self.do_run(src, expected, post_build=add_pre_run)
+    self.do_run(src, expected)
 
   def test_unistd_swab(self):
     src = open(path_from_root('tests', 'unistd', 'swab.c'), 'r').read()
@@ -7702,18 +7683,11 @@ def process(filename):
     self.do_run(src, 'success', force_c=True)
 
   def test_unistd_links(self):
-    add_pre_run = '''
-def process(filename):
-  import tools.shared as shared
-  src = open(filename, 'r').read().replace(
-    '// {{PRE_RUN_ADDITIONS}}',
-    open(shared.path_from_root('tests', 'unistd', 'links.js'), 'r').read()
-  )
-  open(filename, 'w').write(src)
-'''
+    if Settings.ASM_JS: Settings.ASM_JS = 2 # skip validation, asm does not support random code
+    if not self.is_le32(): return self.skip('le32 needed for inline js')
     src = open(path_from_root('tests', 'unistd', 'links.c'), 'r').read()
     expected = open(path_from_root('tests', 'unistd', 'links.out'), 'r').read()
-    self.do_run(src, expected, post_build=add_pre_run)
+    self.do_run(src, expected)
 
   def test_unistd_sleep(self):
     src = open(path_from_root('tests', 'unistd', 'sleep.c'), 'r').read()
@@ -7721,18 +7695,12 @@ def process(filename):
     self.do_run(src, expected)
 
   def test_unistd_io(self):
-    add_pre_run = '''
-def process(filename):
-  import tools.shared as shared
-  src = open(filename, 'r').read().replace(
-    '// {{PRE_RUN_ADDITIONS}}',
-    open(shared.path_from_root('tests', 'unistd', 'io.js'), 'r').read()
-  )
-  open(filename, 'w').write(src)
-'''
+    if Settings.ASM_JS: Settings.ASM_JS = 2 # skip validation, asm does not support random code
+    if not self.is_le32(): return self.skip('le32 needed for inline js')
+    if self.run_name == 'o2': return self.skip('non-asm optimized builds can fail with inline js')
     src = open(path_from_root('tests', 'unistd', 'io.c'), 'r').read()
     expected = open(path_from_root('tests', 'unistd', 'io.out'), 'r').read()
-    self.do_run(src, expected, post_build=add_pre_run)
+    self.do_run(src, expected)
 
   def test_unistd_misc(self):
     src = open(path_from_root('tests', 'unistd', 'misc.c'), 'r').read()
