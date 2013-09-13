@@ -75,6 +75,17 @@ plugins = []
 jsoutput = None
 force = True
 use_preload_cache = False
+loadfile = None
+
+def add_data_file_entry(mode, arg):
+  if '@' in arg:
+    srcpath, dstpath = arg.split('@') # User is specifying destination filename explicitly.
+  else:
+    srcpath = dstpath = arg # Use source path as destination path.
+  if os.path.isfile(srcpath) or os.path.isdir(srcpath):
+    data_files.append({ 'srcpath': srcpath, 'dstpath': dstpath, 'mode': mode })
+  else:
+    print >> sys.stderr, 'Warning: ' + arg + ' does not exist, ignoring.'
 
 for arg in sys.argv[1:]:
   if arg == '--preload':
@@ -114,18 +125,20 @@ for arg in sys.argv[1:]:
     in_preload = False
     in_embed = False
     in_compress = 0
+  elif arg.startswith('--loadfile'):
+    loadfile = arg.split('=')[1] if '=' in arg else None
+    mode = 'preload'
+    if in_embed:
+      mode = 'embed'
+    with open(loadfile) as f:
+      for line in f:
+        add_data_file_entry(mode, line.rstrip('\n'))
   elif in_preload or in_embed:
     mode = 'preload'
     if in_embed:
       mode = 'embed'
-    if '@' in arg:
-      srcpath, dstpath = arg.split('@') # User is specifying destination filename explicitly.
-    else:
-      srcpath = dstpath = arg # Use source path as destination path.
-    if os.path.isfile(srcpath) or os.path.isdir(srcpath):
-      data_files.append({ 'srcpath': srcpath, 'dstpath': dstpath, 'mode': mode })
-    else:
-      print >> sys.stderr, 'Warning: ' + arg + ' does not exist, ignoring.'
+    if not arg.startswith('--loadfile'):
+      add_data_file_entry(mode, arg)
   elif in_compress:
     if in_compress == 1:
       Compression.encoder = arg
@@ -149,12 +162,11 @@ function assert(check, msg) {
   if (!check) throw msg + new Error().stack;
 }
 '''
-
 # Win32 code to test whether the given file has the hidden property set.
 def has_hidden_attribute(filepath):
   if sys.platform != 'win32':
     return False
-    
+
   try:
     attrs = ctypes.windll.kernel32.GetFileAttributesW(unicode(filepath))
     assert attrs != -1
@@ -169,7 +181,7 @@ def has_hidden_attribute(filepath):
 def should_ignore(filename):
   if has_hidden_attribute(filename):
     return True
-    
+
   components = filename.replace('\\\\', '/').replace('\\', '/').split('/')
   for c in components:
     if c.startswith('.') and c != '.' and c != '..':
