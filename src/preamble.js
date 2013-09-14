@@ -942,8 +942,9 @@ Math.toFloat32 = Math['toFloat32'];
 // the dependencies are met.
 var runDependencies = 0;
 var runDependencyTracking = {};
-var calledInit = false, calledRun = false;
 var runDependencyWatcher = null;
+var dependenciesFulfilled = null; // overridden to take different actions when all run dependencies are fulfilled
+
 function addRunDependency(id) {
   runDependencies++;
   if (Module['monitorRunDependencies']) {
@@ -990,9 +991,11 @@ function removeRunDependency(id) {
     if (runDependencyWatcher !== null) {
       clearInterval(runDependencyWatcher);
       runDependencyWatcher = null;
-    } 
-    // If run has never been called, and we should call run (INVOKE_RUN is true, and Module.noInitialRun is not false)
-    if (!calledRun && shouldRunNow) run();
+    }
+    if (dependenciesFulfilled) {
+      dependenciesFulfilled();
+      dependenciesFulfilled = null;
+    }
   }
 }
 Module['removeRunDependency'] = removeRunDependency;
@@ -1017,28 +1020,7 @@ __ATEXIT__.push({ func: function() { PGOMonitor.dump() } });
 addOnPreRun(function() { addRunDependency('pgo') });
 #endif
 
-function loadMemoryInitializer(filename) {
-  function applyData(data) {
-#if USE_TYPED_ARRAYS == 2
-    HEAPU8.set(data, STATIC_BASE);
-#else
-    allocate(data, 'i8', ALLOC_NONE, STATIC_BASE);
-#endif
-  }
-
-  // always do this asynchronously, to keep shell and web as similar as possible
-  addOnPreRun(function() {
-    if (ENVIRONMENT_IS_NODE || ENVIRONMENT_IS_SHELL) {
-      applyData(Module['readBinary'](filename));
-    } else {
-      Browser.asyncLoad(filename, function(data) {
-        applyData(data);
-      }, function(data) {
-        throw 'could not load memory initializer ' + filename;
-      });
-    }
-  });
-}
+var memoryInitializer = null;
 
 // === Body ===
 
