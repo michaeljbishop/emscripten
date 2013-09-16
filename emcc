@@ -556,6 +556,8 @@ if CONFIGURE_CONFIG or CMAKE_CONFIG:
     elif arg.endswith('.s'):
       if debug_configure: open(tempout, 'a').write('(compiling .s assembly, must use clang\n')
       use_js = 0
+    elif arg == '-E':
+      use_js = 0
 
   if src:
     if 'fopen' in src and '"w"' in src:
@@ -669,7 +671,7 @@ if '-M' in sys.argv or '-MM' in sys.argv:
 if '-E' in sys.argv:
   # Just run the preprocessor
   cmd = [CC] + sys.argv[1:]
-  logging.debug('just preprocssor ' + ' '.join(cmd))
+  logging.debug('just preprocessor ' + ' '.join(cmd))
   exit(subprocess.call(cmd))
 
 # Check if a target is specified
@@ -1618,7 +1620,7 @@ try:
           temp_memfile = os.path.join(shared.EMSCRIPTEN_TEMP_DIR, os.path.basename(memfile))
           if os.path.abspath(memfile) != os.path.abspath(memfile):
             shutil.copyfile(memfile, temp_memfile)
-        return 'loadMemoryInitializer("%s");' % os.path.basename(memfile)
+        return 'var memoryInitializer = "%s";' % os.path.basename(memfile)
       src = re.sub(shared.JS.memory_initializer_pattern, repl, open(final).read(), count=1)
       open(final + '.mem.js', 'w').write(src)
       final += '.mem.js'
