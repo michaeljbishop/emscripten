@@ -35,8 +35,13 @@ function preprocess(text) {
         var op = parts[2];
         var value = parts[3];
         if (op) {
-          assert(op === '==')
-          showStack.push(ident in this && this[ident] == value);
+          if (op === '==') {
+            showStack.push(ident in this && this[ident] == value);
+          } else if (op === '!=') {
+            showStack.push(!(ident in this && this[ident] == value));
+          } else {
+            error('unsupported preprecessor op ' + op);
+          }
         } else {
           showStack.push(ident in this && this[ident] > 0);
         }
@@ -65,7 +70,7 @@ function pointingLevels(type) {
   var ret = 0;
   var len1 = type.length - 1;
   while (type[len1-ret] && type[len1-ret] === '*') {
-    ret ++;
+    ret++;
   }
   return ret;
 }
@@ -109,6 +114,10 @@ function isJSVar(ident) {
 
 }
 
+function isLocalVar(ident) {
+  return ident[0] == '$';
+}
+
 function isStructPointerType(type) {
   // This test is necessary for clang - in llvm-gcc, we
   // could check for %struct. The downside is that %1 can
@@ -125,9 +134,13 @@ function isPointerType(type) {
   return type[type.length-1] == '*';
 }
 
+function isArrayType(type) {
+  return /^\[\d+\ x\ (.*)\]/.test(type);
+}
+
 function isStructType(type) {
   if (isPointerType(type)) return false;
-  if (/^\[\d+\ x\ (.*)\]/.test(type)) return true; // [15 x ?] blocks. Like structs
+  if (isArrayType(type)) return true;
   if (/<?{ ?[^}]* ?}>?/.test(type)) return true; // { i32, i8 } etc. - anonymous struct types
   // See comment in isStructPointerType()
   return type[0] == '%';
@@ -160,7 +173,8 @@ function isIntImplemented(type) {
 }
 
 // Note: works for iX types and structure types, not pointers (even though they are implemented as ints)
-function getBits(type) {
+function getBits(type, allowPointers) {
+  if (allowPointers && isPointerType(type)) return 32;
   if (!type) return 0;
   if (type[0] == 'i') {
     var left = type.substr(1);
@@ -172,9 +186,21 @@ function getBits(type) {
   }
   if (isStructType(type)) {
     var typeData = Types.types[type];
+    if (typeData === undefined) return 0;
     return typeData.flatSize*8;
   }
   return 0;
+}
+
+function getNumIntChunks(type) {
+  return Math.ceil(getBits(type, true)/32);
+}
+
+function isIdenticallyImplemented(type1, type2) {
+  var floats = +(type1 in Runtime.FLOAT_TYPES) + +(type2 in Runtime.FLOAT_TYPES);
+  if (floats == 2) return true;
+  if (floats == 1) return false;
+  return getNumIntChunks(type1) == getNumIntChunks(type2);
 }
 
 function isIllegalType(type) {
@@ -228,11 +254,26 @@ function isFunctionType(type, out) {
     returnType = 'i8*'; // some pointer type, no point in analyzing further
   }
   if (out) out.returnType = returnType;
-  var argText = type.substr(lastOpen);
+  // find ( that starts the arguments
+  var depth = 0, i = type.length-1, argText = null;
+  while (i >= 0) {
+    var curr = type[i];
+    if (curr == ')') depth++;
+    else if (curr == '(') {
+      depth--;
+      if (depth == 0) {
+        argText = type.substr(i);
+        break;
+      }
+    }
+    i--;
+  }
+  assert(argText);
   return isFunctionDef({ text: argText, item: tokenize(argText.substr(1, argText.length-2), true) }, out);
 }
 
 function getReturnType(type) {
+  if (pointingLevels(type) > 1) return '*'; // the type of a call can be either the return value, or the entire function. ** or more means it is a return value
   var lastOpen = type.lastIndexOf('(');
   if (lastOpen > 0) {
     return type.substr(0, lastOpen-1);
@@ -254,11 +295,22 @@ function isVarArgsFunctionType(type) {
   return type.substr(-varArgsSuffix.length) == varArgsSuffix;
 }
 
-function countNormalArgs(type) {
-  var out = {};
+function getNumLegalizedVars(type) { // how many legalized variables are needed to represent this type
+  if (type in Runtime.FLOAT_TYPES) return 1;
+  return Math.max(getNumIntChunks(type), 1);
+}
+
+function countNormalArgs(type, out, legalized) {
+  out = out || {};
   if (!isFunctionType(type, out)) return -1;
-  if (isVarArgsFunctionType(type)) out.numArgs--;
-  return out.numArgs;
+  var ret = 0;
+  if (out.segments) {
+    for (var i = 0; i < out.segments.length; i++) {
+      ret += legalized ? getNumLegalizedVars(out.segments[i][0].text) : 1;
+    }
+  }
+  if (isVarArgsFunctionType(type)) ret--;
+  return ret;
 }
 
 function addIdent(token) {
@@ -349,11 +401,17 @@ function parseParamTokens(params) {
       // handle 'byval' and 'byval align X'. We store the alignment in 'byVal'
       byVal = QUANTUM_SIZE;
       segment.splice(1, 1);
+      if (segment[1] && segment[1].text === 'nocapture') {
+        segment.splice(1, 1);
+      }
       if (segment[1] && segment[1].text === 'align') {
         assert(isNumber(segment[2].text));
         byVal = parseInt(segment[2].text);
         segment.splice(1, 2);
       }
+    }
+    if (segment[1] && segment[1].text === 'nocapture') {
+      segment.splice(1, 1);
     }
     if (segment.length == 1) {
       if (segment[0].text == '...') {
@@ -377,6 +435,8 @@ function parseParamTokens(params) {
       ret.push(parseLLVMFunctionCall(segment));
     } else if (segment[1].text === 'blockaddress') {
       ret.push(parseBlockAddress(segment));
+    } else if (segment[1].type && segment[1].type == '{') {
+      ret.push(parseLLVMSegment(segment));
     } else {
       if (segment[2] && segment[2].text == 'to') { // part of bitcast params
         segment = segment.slice(0, 2);
@@ -420,6 +480,18 @@ function isIndexableGlobal(ident) {
   return !data.alias && !data.external;
 }
 
+function isBSS(item) {
+  if (!USE_BSS) {
+    return false;
+  }
+
+  if (item.external) return false; // externals are typically implemented in a JS library, and must be accessed by name, explicitly
+
+  // return true if a global is uninitialized or initialized to 0
+  return (item.value && item.value.intertype === 'emptystruct') ||
+         (item.value && item.value.value !== undefined && item.value.value === '0');
+}
+
 function makeGlobalDef(ident) {
   if (!NAMED_GLOBALS && isIndexableGlobal(ident)) return '';
   return 'var ' + ident + ';';
@@ -433,8 +505,9 @@ function makeGlobalUse(ident) {
       UNINDEXABLE_GLOBALS[ident] = 1;
       return ident;
     }
-    // We know and assert on TOTAL_STACK being equal to GLOBAL_BASE
-    return (TOTAL_STACK + index).toString();
+    var ret = (Runtime.GLOBAL_BASE + index).toString();
+    if (SIDE_MODULE) ret = '(H_BASE+' + ret + ')';
+    return ret;
   }
   return ident;
 }
@@ -444,7 +517,10 @@ function sortGlobals(globals) {
   ks.sort();
   var inv = invertArray(ks);
   return values(globals).sort(function(a, b) {
-    return inv[b.ident] - inv[a.ident];
+    // sort globals based on if they need to be explicitly initialized or not (moving
+    // values that don't need to be to the end of the array). if equal, sort by name.
+    return (Number(isBSS(a)) - Number(isBSS(b))) ||
+      (inv[b.ident] - inv[a.ident]);
   });
 }
 
@@ -569,7 +645,9 @@ function parseLLVMFunctionCall(segment) {
 function eatLLVMIdent(tokens) {
   var ret;
   if (tokens[0].text in PARSABLE_LLVM_FUNCTIONS) {
-    ret = parseLLVMFunctionCall([{text: 'i0'}].concat(tokens.slice(0,2))).ident; // TODO: Handle more cases, return a full object, process it later
+    var item = parseLLVMFunctionCall([{text: '?'}].concat(tokens.slice(0,2))); // TODO: Handle more cases, return a full object, process it later
+    if (item.intertype == 'bitcast') checkBitcast(item);
+    ret = item.ident;
     tokens.shift();
     tokens.shift();
   } else {
@@ -583,7 +661,7 @@ function cleanOutTokens(filterOut, tokens, indexes) {
   if (typeof indexes !== 'object') indexes = [indexes];
   for (var i = indexes.length-1; i >=0; i--) {
     var index = indexes[i];
-    while (tokens[index].text in filterOut) {
+    while (index < tokens.length && tokens[index].text in filterOut) {
       tokens.splice(index, 1);
     }
   }
@@ -604,6 +682,7 @@ function IEEEUnHex(stringy) {
   while (stringy.length < 16) stringy = '0' + stringy;
   if (FAKE_X86_FP80 && stringy.length > 16) {
     stringy = stringy.substr(stringy.length-16, 16);
+    assert(TARGET_X86, 'must only see >64 bit floats in x86, as fp80s');
     warnOnce('.ll contains floating-point values with more than 64 bits. Faking values for them. If they are used, this will almost certainly break horribly!');
   }
   assert(stringy.length === 16, 'Can only unhex 16-digit double numbers, nothing platform-specific'); // |long double| can cause x86_fp80 which causes this
@@ -655,15 +734,37 @@ function makeI64(low, high) {
 // Splits a number (an integer in a double, possibly > 32 bits) into an USE_TYPED_ARRAYS == 2 i64 value.
 // Will suffer from rounding. mergeI64 does the opposite.
 function splitI64(value, floatConversion) {
-  // We need to min here, since our input might be a double, and large values are rounded, so they can
+  // general idea:
+  //
+  //  $1$0 = ~~$d >>> 0;
+  //  $1$1 = Math_abs($d) >= 1 ? (
+  //     $d > 0 ? Math.min(Math_floor(($d)/ 4294967296.0), 4294967295.0)
+  //            : Math_ceil(Math.min(-4294967296.0, $d - $1$0)/ 4294967296.0)
+  //  ) : 0;
+  //
+  // We need to min on positive values here, since our input might be a double, and large values are rounded, so they can
   // be slightly higher than expected. And if we get 4294967296, that will turn into a 0 if put into a
   // HEAP32 or |0'd, etc.
+  //
+  // For negatives, we need to ensure a -1 if the value is overall negative, even if not significant negative component
+
   var lowInput = legalizedI64s ? value : 'VALUE';
   if (floatConversion && ASM_JS) lowInput = asmFloatToInt(lowInput);
+  var low = lowInput + '>>>0';
+  var high = makeInlineCalculation(
+    asmCoercion('Math.abs(VALUE)', 'double') + ' >= ' + asmEnsureFloat('1', 'double') + ' ? ' +
+      '(VALUE > ' + asmEnsureFloat('0', 'double') + ' ? ' +
+               asmCoercion('Math.min(' + asmCoercion('Math.floor((VALUE)/' + asmEnsureFloat(4294967296, 'float') + ')', 'double') + ', ' + asmEnsureFloat(4294967295, 'float') + ')', 'i32') + '>>>0' +
+               ' : ' + asmFloatToInt(asmCoercion('Math.ceil((VALUE - +((' + asmFloatToInt('VALUE') + ')>>>0))/' + asmEnsureFloat(4294967296, 'float') + ')', 'double')) + '>>>0' + 
+      ')' +
+    ' : 0',
+    value,
+    'tempDouble'
+  );
   if (legalizedI64s) {
-    return [lowInput + '>>>0', 'Math.min(Math.floor((' + value + ')/' + asmEnsureFloat(4294967296, 'float') + '), ' + asmEnsureFloat(4294967295, 'float') + ')>>>0'];
+    return [low, high];
   } else {
-    return makeInlineCalculation(makeI64(lowInput + '>>>0', 'Math.min(Math.floor(VALUE/' + asmEnsureFloat(4294967296, 'float') + '), ' + asmEnsureFloat(4294967295, 'float') + ')>>>0'), value, 'tempBigIntP');
+    return makeI64(low, high);
   }
 }
 function mergeI64(value, unsigned) {
@@ -692,7 +793,7 @@ function makeCopyI64(value) {
 function parseArbitraryInt(str, bits) {
   // We parse the string into a vector of digits, base 10. This is convenient to work on.
 
-  assert(bits % 32 == 0 || ('i' + (bits % 32)) in Runtime.INT_TYPES, 'Arbitrary-sized ints must tails that are of legal size');
+  assert(bits > 0); // NB: we don't check that the value in str can fit in this amount of bits
 
   function str2vec(s) { // index 0 is the highest value
     var ret = [];
@@ -817,7 +918,9 @@ function parseNumerical(value, type) {
     return '0';
   }
   if (isNumber(value)) {
-    return parseFloat(value).toString(); // will change e.g. 5.000000e+01 to 50
+    var ret = parseFloat(value); // will change e.g. 5.000000e+01 to 50
+    if (type in Runtime.FLOAT_TYPES && value[0] == '-' && ret === 0) return '-0'; // fix negative 0, toString makes it 0
+    return ret.toString();
   } else {
     return value;
   }
@@ -901,6 +1004,11 @@ function generateStructTypes(type) {
         }
         ret[index++] = type;
       } else {
+        if (Runtime.isStructType(type) && type[1] === '0') {
+          // this is [0 x something], which does nothing
+          // XXX this happens in java_nbody... assert(i === typeData.fields.length-1);
+          continue;
+        }
         add(Types.types[type]);
       }
       var more = (i+1 < typeData.fields.length ? typeData.flatIndexes[i+1] : typeData.flatSize) - (index - start);
@@ -988,7 +1096,9 @@ function getHeapOffset(offset, type, forceAsm) {
   }
 
   if (Runtime.getNativeFieldSize(type) > 4) {
-    type = 'i32'; // XXX we emulate 64-bit values as 32
+    if (type == 'i64' || TARGET_X86) {
+      type = 'i32'; // XXX we emulate 64-bit values as 32 in x86, and also in le32 but only i64, not double
+    }
   }
 
   var sz = Runtime.getNativeTypeSize(type);
@@ -996,7 +1106,7 @@ function getHeapOffset(offset, type, forceAsm) {
   offset = '(' + offset + ')';
   if (shifts != 0) {
     if (CHECK_HEAP_ALIGN) {
-      return '(CHECK_ALIGN_' + sz + '(' + offset + ')>>' + shifts + ')';
+      return '((CHECK_ALIGN_' + sz + '(' + offset + '|0)|0)>>' + shifts + ')';
     } else {
       return '(' + offset + '>>' + shifts + ')';
     }
@@ -1080,6 +1190,8 @@ var asmPrintCounter = 0;
 // See makeSetValue
 function makeGetValue(ptr, pos, type, noNeedFirst, unsigned, ignore, align, noSafe, forceAsm) {
   if (UNALIGNED_MEMORY) align = 1;
+  else if (FORCE_ALIGNED_MEMORY && !isIllegalType(type)) align = 8;
+
   if (isStructType(type)) {
     var typeData = Types.types[type];
     var ret = [];
@@ -1089,7 +1201,9 @@ function makeGetValue(ptr, pos, type, noNeedFirst, unsigned, ignore, align, noSa
     return '{ ' + ret.join(', ') + ' }';
   }
 
-  if (DOUBLE_MODE == 1 && USE_TYPED_ARRAYS == 2 && type == 'double') {
+  // In double mode 1, in x86 we always assume unaligned because we can't trust that; otherwise in le32
+  // we need this code path if we are not fully aligned.
+  if (DOUBLE_MODE == 1 && USE_TYPED_ARRAYS == 2 && type == 'double' && (TARGET_X86 || align < 8)) {
     return '(' + makeSetTempDouble(0, 'i32', makeGetValue(ptr, pos, 'i32', noNeedFirst, unsigned, ignore, align)) + ',' +
                  makeSetTempDouble(1, 'i32', makeGetValue(ptr, getFastValue(pos, '+', Runtime.getNativeTypeSize('i32')), 'i32', noNeedFirst, unsigned, ignore, align)) + ',' +
             makeGetTempDouble(0, 'double') + ')';
@@ -1098,6 +1212,7 @@ function makeGetValue(ptr, pos, type, noNeedFirst, unsigned, ignore, align, noSa
   if (USE_TYPED_ARRAYS == 2 && align) {
     // Alignment is important here. May need to split this up
     var bytes = Runtime.getNativeTypeSize(type);
+    if (DOUBLE_MODE == 0 && type == 'double') bytes = 4; // we will really only read 4 bytes here
     if (bytes > align) {
       var ret = '(';
       if (isIntImplemented(type)) {
@@ -1105,7 +1220,7 @@ function makeGetValue(ptr, pos, type, noNeedFirst, unsigned, ignore, align, noSa
           // Special case that we can optimize
           ret += makeGetValue(ptr, pos, 'i16', noNeedFirst, 2, ignore) + '|' +
                  '(' + makeGetValue(ptr, getFastValue(pos, '+', 2), 'i16', noNeedFirst, 2, ignore) + '<<16)';
-        } else { // XXX we cannot truly handle > 4...
+        } else { // XXX we cannot truly handle > 4... (in x86)
           ret = '';
           for (var i = 0; i < bytes; i++) {
             ret += '(' + makeGetValue(ptr, getFastValue(pos, '+', i), 'i8', noNeedFirst, 1, ignore) + (i > 0 ? '<<' + (8*i) : '') + ')';
@@ -1154,15 +1269,11 @@ function indexizeFunctions(value, type) {
   var out = {};
   if (type && isFunctionType(type, out) && value[0] === '_') { // checking for _ differentiates from $ (local vars)
     // add signature to library functions that we now know need indexing
-    if (!(value in Functions.implementedFunctions) && !(value in Functions.unimplementedFunctions)) {
-      Functions.unimplementedFunctions[value] = Functions.getSignature(out.returnType, out.segments ? out.segments.map(function(segment) { return segment[0].text }) : []);
+    var sig = Functions.implementedFunctions[value] || Functions.unimplementedFunctions[value];
+    if (!sig) {
+      sig = Functions.unimplementedFunctions[value] = Functions.getSignature(out.returnType, out.segments ? out.segments.map(function(segment) { return segment[0].text }) : [], isVarArgsFunctionType(type));
     }
-
-    if (BUILD_AS_SHARED_LIB) {
-      return '(FUNCTION_TABLE_OFFSET + ' + Functions.getIndex(value) + ')';
-    } else {
-      return Functions.getIndex(value);
-    }
+    return Functions.getIndex(value, sig);
   }
   return value;
 }
@@ -1179,6 +1290,8 @@ function indexizeFunctions(value, type) {
 //! @param noNeedFirst Whether to ignore the offset in the pointer itself.
 function makeSetValue(ptr, pos, value, type, noNeedFirst, ignore, align, noSafe, sep, forcedAlign, forceAsm) {
   if (UNALIGNED_MEMORY && !forcedAlign) align = 1;
+  else if (FORCE_ALIGNED_MEMORY && !isIllegalType(type)) align = 8;
+
   sep = sep || ';';
   if (isStructType(type)) {
     var typeData = Types.types[type];
@@ -1194,7 +1307,7 @@ function makeSetValue(ptr, pos, value, type, noNeedFirst, ignore, align, noSafe,
     return ret.join('; ');
   }
 
-  if (DOUBLE_MODE == 1 && USE_TYPED_ARRAYS == 2 && type == 'double') {
+  if (DOUBLE_MODE == 1 && USE_TYPED_ARRAYS == 2 && type == 'double' && (TARGET_X86 || align < 8)) {
     return '(' + makeSetTempDouble(0, 'double', value) + ',' +
             makeSetValue(ptr, pos, makeGetTempDouble(0, 'i32'), 'i32', noNeedFirst, ignore, align, noSafe, ',') + ',' +
             makeSetValue(ptr, getFastValue(pos, '+', Runtime.getNativeTypeSize('i32')), makeGetTempDouble(1, 'i32'), 'i32', noNeedFirst, ignore, align, noSafe, ',') + ')';
@@ -1209,6 +1322,7 @@ function makeSetValue(ptr, pos, value, type, noNeedFirst, ignore, align, noSafe,
   if (USE_TYPED_ARRAYS == 2 && (align || needSplitting)) {
     // Alignment is important here, or we need to split this up for other reasons.
     var bytes = Runtime.getNativeTypeSize(type);
+    if (DOUBLE_MODE == 0 && type == 'double') bytes = 4; // we will really only read 4 bytes here
     if (bytes > align || needSplitting) {
       var ret = '';
       if (isIntImplemented(type)) {
@@ -1248,7 +1362,6 @@ function makeSetValueAsm(ptr, pos, value, type, noNeedFirst, ignore, align, noSa
   return makeSetValue(ptr, pos, value, type, noNeedFirst, ignore, align, noSafe, sep, forcedAlign, true);
 }
 
-var SEEK_OPTIMAL_ALIGN_MIN = 20;
 var UNROLL_LOOP_MAX = 8;
 
 function makeSetValues(ptr, pos, value, type, num, align) {
@@ -1268,7 +1381,7 @@ function makeSetValues(ptr, pos, value, type, num, align) {
   } else { // USE_TYPED_ARRAYS == 2
     // If we don't know how to handle this at compile-time, or handling it is best done in a large amount of code, call memset
     // TODO: optimize the case of numeric num but non-numeric value
-    if (!isNumber(num) || !isNumber(value) || (align < 4 && parseInt(num) >= SEEK_OPTIMAL_ALIGN_MIN)) {
+    if (!isNumber(num) || !isNumber(value) || (parseInt(num)/align >= UNROLL_LOOP_MAX)) {
       return '_memset(' + asmCoercion(getFastValue(ptr, '+', pos), 'i32') + ', ' + asmCoercion(value, 'i32') + ', ' + asmCoercion(num, 'i32') + ')';
     }
     num = parseInt(num);
@@ -1283,13 +1396,7 @@ function makeSetValues(ptr, pos, value, type, num, align) {
     [4, 2, 1].forEach(function(possibleAlign) {
       if (num == 0) return;
       if (align >= possibleAlign) {
-        if (num <= UNROLL_LOOP_MAX*possibleAlign || ASM_JS) { // XXX test asm performance
-          ret.push(unroll('i' + (possibleAlign*8), Math.floor(num/possibleAlign), possibleAlign, values[possibleAlign]));
-        } else {
-          ret.push('for (var $$dest = ' + getFastValue(ptr, '+', pos) + (possibleAlign > 1 ? '>>' + log2(possibleAlign) : '') + ', ' +
-                            '$$stop = $$dest + ' + Math.floor(num/possibleAlign) + '; $$dest < $$stop; $$dest++) {\n' +
-                   '  HEAP' + (possibleAlign*8) + '[$$dest] = ' + values[possibleAlign] + '\n}');
-        }
+        ret.push(unroll('i' + (possibleAlign*8), Math.floor(num/possibleAlign), possibleAlign, values[possibleAlign]));
         pos = getFastValue(pos, '+', Math.floor(num/possibleAlign)*possibleAlign);
         num %= possibleAlign;
       }
@@ -1326,24 +1433,21 @@ function makeCopyValues(dest, src, num, type, modifier, align, sep) {
             unroll(type, 1) + ' }';
   } else { // USE_TYPED_ARRAYS == 2
     // If we don't know how to handle this at compile-time, or handling it is best done in a large amount of code, call memset
-    if (!isNumber(num) || (align < 4 && parseInt(num) >= SEEK_OPTIMAL_ALIGN_MIN)) {
-      return '_memcpy(' + dest + ', ' + src + ', ' + num + ')';
+    if (!isNumber(num)) num = stripCorrections(num);
+    if (!isNumber(align)) align = stripCorrections(align);
+    if (!isNumber(num) || (parseInt(num)/align >= UNROLL_LOOP_MAX)) {
+      return '(_memcpy(' + dest + ', ' + src + ', ' + num + ')|0)';
     }
     num = parseInt(num);
+    if (ASM_JS) {
+      dest = stripCorrections(dest); // remove corrections, since we will be correcting after we add anyhow,
+      src = stripCorrections(src);   // and in the heap assignment expression
+    }
     var ret = [];
     [4, 2, 1].forEach(function(possibleAlign) {
       if (num == 0) return;
       if (align >= possibleAlign) {
-        // If we can unroll the loop, do so. Also do so if we must unroll it (we do not create real loops when inlined)
-        if (num <= UNROLL_LOOP_MAX*possibleAlign || sep == ',' || ASM_JS) { // XXX test asm performance
-          ret.push(unroll('i' + (possibleAlign*8), Math.floor(num/possibleAlign), possibleAlign));
-        } else {
-          assert(sep == ';');
-          ret.push('for (var $$src = ' + src + (possibleAlign > 1 ? '>>' + log2(possibleAlign) : '') + ', ' +
-                            '$$dest = ' + dest + (possibleAlign > 1 ? '>>' + log2(possibleAlign) : '') + ', ' +
-                            '$$stop = $$src + ' + Math.floor(num/possibleAlign) + '; $$src < $$stop; $$src++, $$dest++) {\n' +
-                   '  HEAP' + (possibleAlign*8) + '[$$dest] = HEAP' + (possibleAlign*8) + '[$$src]\n}');
-        }
+        ret.push(unroll('i' + (possibleAlign*8), Math.floor(num/possibleAlign), possibleAlign));
         src = getFastValue(src, '+', Math.floor(num/possibleAlign)*possibleAlign);
         dest = getFastValue(dest, '+', Math.floor(num/possibleAlign)*possibleAlign);
         num %= possibleAlign;
@@ -1371,6 +1475,8 @@ var TWO_TWENTY = Math.pow(2, 20);
 function getFastValue(a, op, b, type) {
   a = a.toString();
   b = b.toString();
+  a = a == 'true' ? '1' : (a == 'false' ? '0' : a);
+  b = b == 'true' ? '1' : (b == 'false' ? '0' : b);
   if (isNumber(a) && isNumber(b)) {
     if (op == 'pow') {
       return Math.pow(a, b).toString();
@@ -1412,7 +1518,7 @@ function getFastValue(a, op, b, type) {
         if ((isNumber(a) && Math.abs(a) < TWO_TWENTY) || (isNumber(b) && Math.abs(b) < TWO_TWENTY) || (bits < 32 && !ASM_JS)) {
           return '(((' + a + ')*(' + b + '))&' + ((Math.pow(2, bits)-1)|0) + ')'; // keep a non-eliminatable coercion directly on this
         }
-        return 'Math.imul(' + a + ',' + b + ')';
+        return '(Math.imul(' + a + ',' + b + ')|0)';
       }
     } else {
       if (a == '0') {
@@ -1467,7 +1573,44 @@ function makeGetPos(ptr) {
 
 var IHEAP_FHEAP = set('IHEAP', 'IHEAPU', 'FHEAP');
 
-function makePointer(slab, pos, allocator, type, ptr) {
+var temp64f = new Float64Array(1);
+var temp32f = new Float32Array(temp64f.buffer);
+var temp32 = new Uint32Array(temp64f.buffer);
+var temp16 = new Uint16Array(temp64f.buffer);
+var temp8 = new Uint8Array(temp64f.buffer);
+var memoryInitialization = [];
+
+function writeInt8s(slab, i, value, type) {
+  var currSize;
+  switch (type) {
+    case 'i1':
+    case 'i8': temp8[0] = value;       currSize = 1; break;
+    case 'i16': temp16[0] = value;     currSize = 2; break;
+    case 'float': temp32f[0] = value;  currSize = 4; break;
+    case 'double': temp64f[0] = value; currSize = 8; break;
+    case 'i64': // fall through, i64 is two i32 chunks
+    case 'i32': // fall through, i32 can be a pointer
+    default: {
+      if (type == 'i32' || type == 'i64' || type[type.length-1] == '*') {
+        if (!isNumber(value)) { // function table stuff, etc.
+          slab[i] = value;
+          slab[i+1] = slab[i+2] = slab[i+3] = 0;
+          return 4;
+        }
+        temp32[0] = value;
+        currSize = 4;
+      } else {
+        throw 'what? ' + types[i];
+      }
+    }
+  }
+  for (var j = 0; j < currSize; j++) {
+    slab[i+j] = temp8[j];
+  }
+  return currSize;
+}
+
+function makePointer(slab, pos, allocator, type, ptr, finalMemoryInitialization) {
   assert(type, 'makePointer requires type info');
   if (typeof slab == 'string' && (slab.substr(0, 4) === 'HEAP' || (USE_TYPED_ARRAYS == 1 && slab in IHEAP_FHEAP))) return pos;
   var types = generateStructTypes(type);
@@ -1482,19 +1625,19 @@ function makePointer(slab, pos, allocator, type, ptr) {
     }
   }
   // compress type info and data if possible
-  var de;
-  try {
-    // compress all-zeros into a number (which will become zeros(..)).
-    // note that we cannot always eval the slab, e.g., if it contains ident,0,0 etc. In that case, no compression TODO: ensure we get arrays here, not str
-    var evaled = typeof slab === 'string' ? eval(slab) : slab;
-    de = dedup(evaled);
-    if (de.length === 1 && de[0] == 0) {
-      slab = types.length;
-    }
-    // TODO: if not all zeros, at least filter out items with type === 0. requires cleverness to know how to skip at runtime though. also
-    //       be careful of structure padding
-  } catch(e){}
   if (USE_TYPED_ARRAYS != 2) {
+    var de;
+    try {
+      // compress all-zeros into a number (which will become zeros(..)).
+      // note that we cannot always eval the slab, e.g., if it contains ident,0,0 etc. In that case, no compression TODO: ensure we get arrays here, not str
+      var evaled = typeof slab === 'string' ? eval(slab) : slab;
+      de = dedup(evaled);
+      if (de.length === 1 && de[0] == 0) {
+        slab = types.length;
+      }
+      // TODO: if not all zeros, at least filter out items with type === 0. requires cleverness to know how to skip at runtime though. also
+      //       be careful of structure padding
+    } catch(e){}
     de = dedup(types);
     if (de.length === 1) {
       types = de[0];
@@ -1506,52 +1649,37 @@ function makePointer(slab, pos, allocator, type, ptr) {
       }
     }
   } else { // USE_TYPED_ARRAYS == 2
-    var fail = false;
-    if (typeof slab === 'object') {
-      // flatten out into i8 values, so we can just to typed array .set()
-      for (var i = 0; i < slab.length; i++) {
-        if (!isNumber(slab[i])) { fail = true; break }
+    if (!finalMemoryInitialization) {
+      // XXX This heavily assumes the target endianness is the same as our current endianness! XXX
+      var i = 0;
+      while (i < slab.length) {
+        var currType = types[i];
+        if (!currType) { i++; continue }
+        i += writeInt8s(slab, i, slab[i], currType);
       }
-      if (!fail) {
-        // XXX This heavily assumes the target endianness is the same as our current endianness! XXX
-        var i = 0;
-        var temp64f = new Float64Array(1);
-        var temp32f = new Float32Array(temp64f.buffer);
-        var temp32 = new Uint32Array(temp64f.buffer);
-        var temp16 = new Uint16Array(temp64f.buffer);
-        var temp8 = new Uint8Array(temp64f.buffer);
-        while (i < slab.length) {
-          var currType = types[i];
-          if (!currType) { i++; continue }
-          var currSize = 0, currValue = slab[i];
-          switch (currType) {
-            case 'i8': i++; continue;
-            case 'i16': temp16[0] = currValue;     currSize = 2; break;
-            case 'i64': // fall through, i64 is two i32 chunks
-            case 'i32': temp32[0] = currValue;     currSize = 4; break;
-            case 'float': temp32f[0] = currValue;  currSize = 4; break;
-            case 'double': temp64f[0] = currValue; currSize = 8; break;
-            default: {
-              if (currType[currType.length-1] == '*') {
-                temp32[0] = currValue;
-                currSize = 4;
-              } else {
-                throw 'what? ' + types[i];
-              }
-            }
-          }
-          for (var j = 0; j < currSize; j++) {
-            slab[i+j] = temp8[j];
-          }
-          i += currSize;
-        }
-      }
+      types = 'i8';
     }
-    if (!fail) types = 'i8';
   }
-  if (typeof slab == 'object') slab = '[' + slab.join(',') + ']';
+  if (allocator == 'ALLOC_NONE' && USE_TYPED_ARRAYS == 2) {
+    if (!finalMemoryInitialization) {
+      // writing out into memory, without a normal allocation. We put all of these into a single big chunk.
+      assert(typeof slab == 'object');
+      assert(slab.length % QUANTUM_SIZE == 0, slab.length); // must be aligned already
+      if (SIDE_MODULE && typeof ptr == 'string') {
+        ptr = parseInt(ptr.substring(ptr.indexOf('+'), ptr.length-1)); // parse into (H_BASE+X)
+      }
+      var offset = ptr - Runtime.GLOBAL_BASE;
+      for (var i = 0; i < slab.length; i++) {
+        memoryInitialization[offset + i] = slab[i];
+      }
+      return '';
+    }
+    // This is the final memory initialization
+    types = 'i8';
+  }
+
   // JS engines sometimes say array initializers are too large. Work around that by chunking and calling concat to combine at runtime
-  var chunkSize = 10240;
+  var chunkSize = JS_CHUNK_SIZE;
   function chunkify(array) {
     // break very large slabs into parts
     var ret = '';
@@ -1562,14 +1690,18 @@ function makePointer(slab, pos, allocator, type, ptr) {
     }
     return ret;
   }
-  if (typeof slab == 'string' && evaled && evaled.length > chunkSize && slab.length > chunkSize) {
-    slab = chunkify(evaled);
+  if (typeof slab == 'object' && slab.length > chunkSize) {
+    slab = chunkify(slab);
+  }
+  if (typeof types == 'object') {
+    while (types.length < slab.length) types.push(0);
   }
   if (typeof types != 'string' && types.length > chunkSize) {
     types = chunkify(types);
   } else {
     types = JSON.stringify(types);
   }
+  if (typeof slab == 'object') slab = '[' + slab.join(',') + ']';
   return 'allocate(' + slab + ', ' + types + (allocator ? ', ' + allocator : '') + (allocator == 'ALLOC_NONE' ? ', ' + ptr : '') + ')';
 }
 
@@ -1596,54 +1728,61 @@ function makeGetSlabs(ptr, type, allowMultiple, unsigned) {
       case 'i1': case 'i8': return [unsigned ? 'HEAPU8' : 'HEAP8']; break;
       case 'i16': return [unsigned ? 'HEAPU16' : 'HEAP16']; break;
       case 'i32': case 'i64': return [unsigned ? 'HEAPU32' : 'HEAP32']; break;
-      case 'float': case 'double': return ['HEAPF32']; break;
+      case 'double': {
+        if (TARGET_LE32) return ['HEAPF64']; // in le32, we do have the ability to assume 64-bit alignment
+        // otherwise, fall through to float
+      }
+      case 'float': return ['HEAPF32'];
       default: {
-        throw 'what, exactly, can we do for unknown types in TA2?! ' + new Error().stack;
+        throw 'what, exactly, can we do for unknown types in TA2?! ' + [new Error().stack, ptr, type, allowMultiple, unsigned];
       }
     }
   }
   return [];
 }
 
+function checkBitcast(item) {
+  // Warn about some types of casts, then fall through to the handling code below
+  var oldType = item.params[0].type;
+  var newType = item.type;
+  if (isPossiblyFunctionType(oldType) && isPossiblyFunctionType(newType)) {
+    var oldInfo = {}, newInfo = {};
+    var oldCount = countNormalArgs(oldType, oldInfo);
+    var newCount = countNormalArgs(newType, newInfo);
+    var warned = false;
+    function showWarning() {
+      if (warned) return;
+      warned = true;
+      if (VERBOSE) {
+        warnOnce('Casting potentially incompatible function pointer ' + oldType + ' to ' + newType + ', for ' + item.params[0].ident.slice(1));
+      } else {
+        warnOnce('Casting a function pointer type to a potentially incompatible one (use -s VERBOSE=1 to see more)');
+      }
+      warnOnce('See https://github.com/kripken/emscripten/wiki/CodeGuidlinesAndLimitations#function-pointer-issues for more information on dangerous function pointer casts');
+      if (ASM_JS) warnOnce('Incompatible function pointer casts are very dangerous with ASM_JS=1, you should investigate and correct these');
+    }
+    if (oldCount != newCount && oldCount && newCount) showWarning();
+    if (ASM_JS) {
+      if (oldCount != newCount) showWarning();
+      else if (!isIdenticallyImplemented(oldInfo.returnType, newInfo.returnType)) {
+        showWarning();
+      } else {
+        for (var i = 0; i < oldCount; i++) {
+          if (!isIdenticallyImplemented(oldInfo.segments[i][0].text, newInfo.segments[i][0].text)) {
+            showWarning();
+            break;
+          }
+        }
+      }
+    }
+  }
+}
+
 function finalizeLLVMFunctionCall(item, noIndexizeFunctions) {
   if (item.intertype == 'getelementptr') { // TODO finalizeLLVMParameter on the ident and the indexes?
     return makePointer(makeGetSlabs(item.ident, item.type)[0], getGetElementPtrIndexes(item), null, item.type);
   }
-  if (item.intertype == 'bitcast') {
-    // Warn about some types of casts, then fall through to the handling code below
-    var oldType = item.params[0].type;
-    var newType = item.type;
-    if (isPossiblyFunctionType(oldType) && isPossiblyFunctionType(newType)) {
-      var oldCount = countNormalArgs(oldType);
-      var newCount = countNormalArgs(newType);
-      if (oldCount != newCount && oldCount && newCount) {
-        warnOnce('Casting a function pointer type to another with a different number of arguments. See more info in the compiler source');
-        if (VERBOSE) {
-          warnOnce('Casting a function pointer type to another with a different number of arguments: ' + oldType + ' vs. ' + newType + ', on ' + item.params[0].ident);
-        }
-        // This may be dangerous as clang generates different code for C and C++ calling conventions. The only problem
-        // case appears to be passing a structure by value, C will have (field1, field2) as function args, and the
-        // function will internally create a structure with that data, while C++ will have (struct* byVal) and it
-        // will create a copy before calling the function, then call it with a pointer to the copy. Mixing the two
-        // first of all leads to two copies being made, so this is a bad idea even regardless of Emscripten. But,
-        // what is a problem for Emscr ipten is that mixing these two calling conventions (say, calling a C one from
-        // C++) will then assume that (struct* byVal) is actually the same as (field1, field2). In native code, this
-        // is easily possible, you place the two fields on the stack and call the function (you know to place the
-        // values since there is 'byVal'). In Emscripten, though, this means we would need to always do one or the
-        // other of the two possibilities, for example, always passing by-value structs as (field1, field2). This
-        // would slow down everything, just to handle this corner case. (Which, just to point out how much of a
-        // corner case it is, does not appear to happen with nested structures!)
-        //
-        // The recommended solution for this problem is not to mix C and C++ calling conventions when passing structs
-        // by value. Either always pass structs by value within C code or C++ code, but not mixing the two by
-        // defining a function in one and calling it from the other (so, just changing .c to .cpp, or moving code
-        // from one file to another, would be enough to fix this), or, do not pass structs by value (which in general
-        // is inefficient, and worth avoiding if you can).
-        //
-        // Note that removing all arguments is acceptable, as a vast to void ()*.
-      }
-    }
-  }
+  if (item.intertype == 'bitcast') checkBitcast(item);
   var temp = {
     op: item.intertype,
     variant: item.variant,
@@ -1675,10 +1814,11 @@ function getGetElementPtrIndexes(item) {
       indexes.push(getFastValue(Runtime.getNativeTypeSize(type), '*', offset, 'i32'));
     }
   }
-  item.params.slice(2, item.params.length).forEach(function(arg) {
+  item.params.slice(2, item.params.length).forEach(function(arg, i) {
     var curr = arg;
     // TODO: If index is constant, optimize
     var typeData = Types.types[type];
+    assert(typeData || i == item.params.length - 3); // can be null, when we get to the end (a basic type)
     if (isStructType(type) && typeData.needsFlattening) {
       if (typeData.flatFactor) {
         indexes.push(getFastValue(curr, '*', typeData.flatFactor, 'i32'));
@@ -1694,16 +1834,15 @@ function getGetElementPtrIndexes(item) {
         indexes.push(curr);
       }
     }
-    if (!isNumber(curr) || parseInt(curr) < 0) {
-      // We have a *variable* to index with, or a negative number. In both
-      // cases, in theory we might need to do something dynamic here. FIXME?
-      // But, most likely all the possible types are the same, so do that case here now...
-      for (var i = 1; i < typeData.fields.length; i++) {
-        assert(typeData.fields[0] === typeData.fields[i]);
+    if (typeData) {
+      if (isArrayType(type)) {
+        type = typeData.fields[0]; // all the same, so accept even out-of-bounds this way
+      } else {
+        assert(isNumber(curr)); // cannot be dynamic
+        type = typeData.fields[curr];
       }
-      curr = 0;
+      assert(type);
     }
-    type = typeData && typeData.fields[curr] ? typeData.fields[curr] : '';
   });
 
   var ret = getFastValues(indexes, '+', 'i32');
@@ -1737,13 +1876,14 @@ function makeLLVMStruct(values) {
   }
 }
 
-function makeStructuralReturn(values) {
+function makeStructuralReturn(values, inAsm) {
   if (USE_TYPED_ARRAYS == 2) {
-    var i = 0;
-    return 'return (' + values.slice(1).map(function(value) {
-      return ASM_JS ? 'asm.setTempRet' + (i++) + '(' + value + ')'
-                    : 'tempRet' + (i++) + ' = ' + value;
-    }).concat([values[0]]).join(',') + ')';
+    var i = -1;
+    return 'return ' + asmCoercion(values.slice(1).map(function(value) {
+      i++;
+      return ASM_JS ? (inAsm ? 'tempRet' + i + ' = ' + value : 'asm["setTempRet' + i + '"](' + value + ')')
+                    : 'tempRet' + i + ' = ' + value;
+    }).concat([values[0]]).join(','), 'i32');
   } else {
     var i = 0;
     return 'return { ' + values.map(function(value) {
@@ -1838,9 +1978,10 @@ function makeSignOp(value, type, op, force, ignore) {
     if (!CHECK_SIGNS || ignore) {
       if (bits === 32) {
         if (op === 're') {
-          return '((' + value + ')|0)';
+          return '(' + getFastValue(value, '|', '0') + ')';
         } else {
-          return '((' + value + ')>>>0)';
+
+          return '(' + getFastValue(value, '>>>', '0') + ')';
           // Alternatively, we can consider the lengthier
           //    return makeInlineCalculation('VALUE >= 0 ? VALUE : ' + Math.pow(2, bits) + ' + VALUE', value, 'tempBigInt');
           // which does not always turn us into a 32-bit *un*signed value
@@ -1849,7 +1990,7 @@ function makeSignOp(value, type, op, force, ignore) {
         if (op === 're') {
           return makeInlineCalculation('(VALUE << ' + (32-bits) + ') >> ' + (32-bits), value, 'tempInt');
         } else {
-          return '((' + value + ')&' + (Math.pow(2, bits)-1) + ')';
+          return '(' + getFastValue(value, '&', Math.pow(2, bits)-1) + ')';
         }
       } else { // bits > 32
         if (op === 're') {
@@ -1908,6 +2049,13 @@ function makeIsNaN(value) {
   return 'isNaN(' + value + ')';
 }
 
+function makeFloat(value, type) {
+  if (TO_FLOAT32 && type == 'float') {
+    return 'Math.toFloat32(' + value + ')';
+  }
+  return value;
+}
+
 // fptoui and fptosi are not in these, because we need to be careful about what we do there. We can't
 // just sign/unsign the input first.
 var UNSIGNED_OP = set('udiv', 'urem', 'uitofp', 'zext', 'lshr');
@@ -1953,12 +2101,20 @@ function processMathop(item) {
   }
   var bitsBefore = parseInt((item.params[0] ? item.params[0].type : item.type).substr(1)); // remove i to leave the number of bits left after this
   var bitsLeft = parseInt(((item.params[1] && item.params[1].ident) ? item.params[1].ident : item.type).substr(1)); // remove i to leave the number of bits left after this operation
+  var rawBits = getBits(item.type);
+  assert(rawBits <= 64);
 
   function integerizeBignum(value) {
     return makeInlineCalculation('VALUE-VALUE%1', value, 'tempBigIntI');
   }
 
-  if ((type == 'i64' || paramTypes[0] == 'i64' || paramTypes[1] == 'i64' || idents[1] == '(i64)') && USE_TYPED_ARRAYS == 2) {
+  if ((type == 'i64' || paramTypes[0] == 'i64' || paramTypes[1] == 'i64' || idents[1] == '(i64)' || rawBits > 32) && USE_TYPED_ARRAYS == 2) {
+    // this code assumes i64 for the most part
+    if (ASSERTIONS && rawBits > 1 && rawBits < 64) {
+      warnOnce('processMathop processing illegal non-i64 value');
+      if (VERBOSE) printErr([op, item.type, rawBits, type, paramTypes, idents]);
+    }
+
     var warnI64_1 = function() {
       warnOnce('Arithmetic on 64-bit integers in mode 1 is rounded and flaky, like mode 0!');
     };
@@ -1983,6 +2139,13 @@ function processMathop(item) {
       return finish(['(i64Math' + (ASM_JS ? '_' : '.') + type + '(' + asmCoercion(low1, 'i32') + ',' + asmCoercion(high1, 'i32') + ',' + asmCoercion(low2, 'i32') + ',' + asmCoercion(high2, 'i32') +
                      (lastArg ? ',' + asmCoercion(+lastArg, 'i32') : '') + '),' + makeGetValue('tempDoublePtr', 0, 'i32') + ')', makeGetValue('tempDoublePtr', Runtime.getNativeTypeSize('i32'), 'i32')]);
     }
+    function preciseCall(name) {
+      Types.preciseI64MathUsed = true;
+      return finish([asmCoercion(name + '(' + low1 + ',' + high1 + ',' + low2 + ',' + high2 + ')', 'i32'), 'tempRet0']);
+    }
+    function i64PreciseLib(type) {
+      return preciseCall('_i64' + type[0].toUpperCase() + type.substr(1));
+    }
     switch (op) {
       // basic integer ops
       case 'or': {
@@ -1997,43 +2160,7 @@ function processMathop(item) {
       case 'shl':
       case 'ashr':
       case 'lshr': {
-        if (!isNumber(idents[1])) {
-          return '(Runtime' + (ASM_JS ? '_' : '.') + 'bitshift64(' + idents[0] + '[0], ' + idents[0] + '[1],' + Runtime['BITSHIFT64_' + op.toUpperCase()] + ',' + stripCorrections(idents[1]) + '[0]|0),' +
-            '[' + makeGetTempDouble(0, 'i32') + ',' + makeGetTempDouble(1, 'i32') + '])';
-        }
-        bits = parseInt(idents[1]);
-        var ander = Math.pow(2, bits)-1;
-        if (bits < 32) {
-          switch (op) {
-            case 'shl':
-              return '[' + idents[0] + '[0] << ' + idents[1] + ', ' +
-                       '('+idents[0] + '[1] << ' + idents[1] + ') | ((' + idents[0] + '[0]&(' + ander + '<<' + (32 - bits) + ')) >>> (32-' + idents[1] + '))]';
-            case 'ashr':
-              return '[((('+idents[0] + '[0] >>> ' + idents[1] + ') | ((' + idents[0] + '[1]&' + ander + ')<<' + (32 - bits) + ')) >> 0) >>> 0,' +
-                          '(' + idents[0] + '[1] >> ' + idents[1] + ') >>> 0]';
-            case 'lshr':
-              return '[(('+idents[0] + '[0] >>> ' + idents[1] + ') | ((' + idents[0] + '[1]&' + ander + ')<<' + (32 - bits) + ')) >>> 0,' +
-                          idents[0] + '[1] >>> ' + idents[1] + ']';
-          }
-        } else if (bits == 32) {
-          switch (op) {
-            case 'shl':
-              return '[0, ' + idents[0] + '[0]]';
-            case 'ashr':
-              return '[' + idents[0] + '[1], (' + idents[0] + '[1]|0) < 0 ? ' + ander + ' : 0]';
-            case 'lshr':
-              return '[' + idents[0] + '[1], 0]';
-          }
-        } else { // bits > 32
-          switch (op) {
-            case 'shl':
-              return '[0, ' + idents[0] + '[0] << ' + (bits - 32) + ']';
-            case 'ashr':
-              return '[(' + idents[0] + '[1] >> ' + (bits - 32) + ') >>> 0, (' + idents[0] + '[1]|0) < 0 ? ' + ander + ' : 0]';
-            case 'lshr':
-              return '[' + idents[0] + '[1] >>> ' + (bits - 32) + ', 0]';
-          }
-        }
+				throw 'shifts should have been legalized!';
       }
       case 'uitofp': case 'sitofp': return RuntimeGenerator.makeBigInt(low1, high1, op[0] == 'u');
       case 'fptoui': case 'fptosi': return finish(splitI64(idents[0], true));
@@ -2067,11 +2194,15 @@ function processMathop(item) {
       }
       case 'select': return idents[0] + ' ? ' + makeCopyI64(idents[1]) + ' : ' + makeCopyI64(idents[2]);
       case 'ptrtoint': return makeI64(idents[0], 0);
-      case 'inttoptr': return '(' + idents[0] + '[0])'; // just directly truncate the i64 to a 'pointer', which is an i32
+      case 'inttoptr': {
+        var m = /\(?\[(\d+),\d+\]\)?/.exec(idents[0]);
+        if (m) return m[1]; // constant, can just parse it right now
+        return '(' + idents[0] + '[0])'; // just directly truncate the i64 to a 'pointer', which is an i32
+      }
       // Dangerous, rounded operations. TODO: Fully emulate
       case 'add': {
         if (PRECISE_I64_MATH) {
-          return i64PreciseOp('add');
+          return i64PreciseLib('add');
         } else {
           warnI64_1();
           return finish(splitI64(mergeI64(idents[0]) + '+' + mergeI64(idents[1]), true));
@@ -2079,7 +2210,7 @@ function processMathop(item) {
       }
       case 'sub': {
         if (PRECISE_I64_MATH) {
-          return i64PreciseOp('subtract');
+          return i64PreciseLib('subtract');
         } else {
           warnI64_1();
           return finish(splitI64(mergeI64(idents[0]) + '-' + mergeI64(idents[1]), true));
@@ -2087,7 +2218,7 @@ function processMathop(item) {
       }
       case 'sdiv': case 'udiv': {
         if (PRECISE_I64_MATH) {
-          return i64PreciseOp('divide', op[0] === 'u');
+          return preciseCall(op[0] === 'u' ? '___udivdi3' : '___divdi3');
         } else {
           warnI64_1();
           return finish(splitI64(makeRounding(mergeI64(idents[0], op[0] === 'u') + '/' + mergeI64(idents[1], op[0] === 'u'), bits, op[0] === 's'), true));
@@ -2095,7 +2226,7 @@ function processMathop(item) {
       }
       case 'mul': {
         if (PRECISE_I64_MATH) {
-          return i64PreciseOp('multiply');
+          return preciseCall('___muldi3');
         } else {
           warnI64_1();
           return finish(splitI64(mergeI64(idents[0], op[0] === 'u') + '*' + mergeI64(idents[1], op[0] === 'u'), true));
@@ -2103,7 +2234,7 @@ function processMathop(item) {
       }
       case 'urem': case 'srem': {
         if (PRECISE_I64_MATH) {
-          return i64PreciseOp('modulo', op[0] === 'u');
+          return preciseCall(op[0] === 'u' ? '___uremdi3' : '___remdi3');
         } else {
           warnI64_1();
           return finish(splitI64(mergeI64(idents[0], op[0] === 'u') + '%' + mergeI64(idents[1], op[0] === 'u'), true));
@@ -2138,9 +2269,9 @@ function processMathop(item) {
     // basic integer ops
     case 'add': return handleOverflow(getFastValue(idents[0], '+', idents[1], item.type), bits);
     case 'sub': return handleOverflow(getFastValue(idents[0], '-', idents[1], item.type), bits);
-    case 'sdiv': case 'udiv': return makeRounding(getFastValue(idents[0], '/', idents[1], item.type), bits, op[0] === 's');
+    case 'sdiv': case 'udiv': return makeRounding(getFastValue(idents[0], '/', idents[1], item.type), bits, true);
     case 'mul': return getFastValue(idents[0], '*', idents[1], item.type); // overflow handling is already done in getFastValue for '*'
-    case 'urem': case 'srem': return getFastValue(idents[0], '%', idents[1], item.type);
+    case 'urem': case 'srem': return makeRounding(getFastValue(idents[0], '%', idents[1], item.type), bits, true);
     case 'or': {
       if (bits > 32) {
         assert(bits === 64, 'Too many bits for or: ' + bits);
@@ -2180,11 +2311,11 @@ function processMathop(item) {
       return idents[0] + ' >>> ' + idents[1];
     }
     // basic float ops
-    case 'fadd': return getFastValue(idents[0], '+', idents[1], item.type);
-    case 'fsub': return getFastValue(idents[0], '-', idents[1], item.type);
-    case 'fdiv': return getFastValue(idents[0], '/', idents[1], item.type);
-    case 'fmul': return getFastValue(idents[0], '*', idents[1], item.type);
-    case 'frem': return getFastValue(idents[0], '%', idents[1], item.type);
+    case 'fadd': return makeFloat(getFastValue(idents[0], '+', idents[1], item.type), item.type);
+    case 'fsub': return makeFloat(getFastValue(idents[0], '-', idents[1], item.type), item.type);
+    case 'fdiv': return makeFloat(getFastValue(idents[0], '/', idents[1], item.type), item.type);
+    case 'fmul': return makeFloat(getFastValue(idents[0], '*', idents[1], item.type), item.type);
+    case 'frem': return makeFloat(getFastValue(idents[0], '%', idents[1], item.type), item.type);
     case 'uitofp': case 'sitofp': return asmCoercion(idents[0], 'double', op[0]);
     case 'fptoui': case 'fptosi': return makeRounding(idents[0], bitsLeft, op === 'fptosi', true);
 
@@ -2200,7 +2331,6 @@ function processMathop(item) {
         case 'ne': case 'eq': {
           // We must sign them, so we do not compare -1 to 255 (could have unsigned them both too)
           // since LLVM tells us if <=, >= etc. comparisons are signed, but not == and !=.
-          assert(paramTypes[0] == paramTypes[1]);
           idents[0] = makeSignOp(idents[0], paramTypes[0], 're');
           idents[1] = makeSignOp(idents[1], paramTypes[1], 're');
           return idents[0] + (variant === 'eq' ? '==' : '!=') + idents[1];
@@ -2361,5 +2491,31 @@ function getImplementationType(varInfo) {
     return removePointing(varInfo.type);
   }
   return varInfo.type;
+}
+
+function charCode(char) {
+  return char.charCodeAt(0);
+}
+
+function getTypeFromHeap(suffix) {
+  switch (suffix) {
+    case '8': return 'i8';
+    case '16': return 'i16';
+    case '32': return 'i32';
+    case 'F32': return 'float';
+    case 'F64': return 'double';
+    default: throw 'getTypeFromHeap? ' + suffix;
+  }
+}
+
+// Generates code that prints without printf(), but just putchar (so can be directly inline in asm.js)
+function makePrintChars(s, sep) {
+  sep = sep || ';';
+  var ret = '';
+  for (var i = 0; i < s.length; i++) {
+    ret += '_putchar(' + s.charCodeAt(i) + ')' + sep;
+  }
+  ret += '_putchar(10)';
+  return ret;
 }
 

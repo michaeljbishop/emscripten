@@ -1530,24 +1530,14 @@ var i64Math = (function() { // Emscripten wrapper
 
   // Emscripten wrapper
   var Wrapper = {
-    add: function(xl, xh, yl, yh) {
-      var x = new goog.math.Long(xl, xh);
-      var y = new goog.math.Long(yl, yh);
-      var ret = x.add(y);
-      HEAP32[tempDoublePtr>>2] = ret.low_;
-      HEAP32[tempDoublePtr+4>>2] = ret.high_;
-    },
-    subtract: function(xl, xh, yl, yh) {
-      var x = new goog.math.Long(xl, xh);
-      var y = new goog.math.Long(yl, yh);
-      var ret = x.subtract(y);
-      HEAP32[tempDoublePtr>>2] = ret.low_;
-      HEAP32[tempDoublePtr+4>>2] = ret.high_;
-    },
-    multiply: function(xl, xh, yl, yh) {
-      var x = new goog.math.Long(xl, xh);
-      var y = new goog.math.Long(yl, yh);
-      var ret = x.multiply(y);
+    abs: function(l, h) {
+      var x = new goog.math.Long(l, h);
+      var ret;
+      if (x.isNegative()) {
+        ret = x.negate();
+      } else {
+        ret = x;
+      }
       HEAP32[tempDoublePtr>>2] = ret.low_;
       HEAP32[tempDoublePtr+4>>2] = ret.high_;
     },
@@ -1571,48 +1561,6 @@ var i64Math = (function() { // Emscripten wrapper
       var d = new BigInteger();
       c.addTo(b, d);
       return d;
-    },
-    divide: function(xl, xh, yl, yh, unsigned) {
-      Wrapper.ensureTemps();
-      if (!unsigned) {
-        var x = new goog.math.Long(xl, xh);
-        var y = new goog.math.Long(yl, yh);
-        var ret = x.div(y);
-        HEAP32[tempDoublePtr>>2] = ret.low_;
-        HEAP32[tempDoublePtr+4>>2] = ret.high_;
-      } else {
-        // slow precise bignum division
-        var x = Wrapper.lh2bignum(xl >>> 0, xh >>> 0);
-        var y = Wrapper.lh2bignum(yl >>> 0, yh >>> 0);
-        var z = new BigInteger();
-        x.divRemTo(y, z, null);
-        var l = new BigInteger();
-        var h = new BigInteger();
-        z.divRemTo(Wrapper.two32, h, l);
-        HEAP32[tempDoublePtr>>2] = parseInt(l.toString()) | 0;
-        HEAP32[tempDoublePtr+4>>2] = parseInt(h.toString()) | 0;
-      }
-    },
-    modulo: function(xl, xh, yl, yh, unsigned) {
-      Wrapper.ensureTemps();
-      if (!unsigned) {
-        var x = new goog.math.Long(xl, xh);
-        var y = new goog.math.Long(yl, yh);
-        var ret = x.modulo(y);
-        HEAP32[tempDoublePtr>>2] = ret.low_;
-        HEAP32[tempDoublePtr+4>>2] = ret.high_;
-      } else {
-        // slow precise bignum division
-        var x = Wrapper.lh2bignum(xl >>> 0, xh >>> 0);
-        var y = Wrapper.lh2bignum(yl >>> 0, yh >>> 0);
-        var z = new BigInteger();
-        x.divRemTo(y, null, z);
-        var l = new BigInteger();
-        var h = new BigInteger();
-        z.divRemTo(Wrapper.two32, h, l);
-        HEAP32[tempDoublePtr>>2] = parseInt(l.toString()) | 0;
-        HEAP32[tempDoublePtr+4>>2] = parseInt(h.toString()) | 0;
-      }
     },
     stringify: function(l, h, unsigned) {
       var ret = new goog.math.Long(l, h).toString();

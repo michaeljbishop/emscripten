@@ -6,6 +6,15 @@
 
 {{RUNTIME}}
 
+#if ASM_JS
+#if RESERVED_FUNCTION_POINTERS
+function jsCall() {
+  var args = Array.prototype.slice.call(arguments);
+  return Runtime.functionPointers[args[0]].apply(null, args.slice(1));
+}
+#endif
+#endif
+
 #if BENCHMARK
 Module.realPrint = Module.print;
 Module.print = Module.printErr = function(){};
@@ -26,17 +35,17 @@ function SAFE_HEAP_CLEAR(dest) {
 var SAFE_HEAP_ERRORS = 0;
 var ACCEPTABLE_SAFE_HEAP_ERRORS = 0;
 
-function SAFE_HEAP_ACCESS(dest, type, store, ignore) {
-  //if (dest === A_NUMBER) Module.print ([dest, type, store] + ' ' + new Error().stack); // Something like this may be useful, in debugging
+function SAFE_HEAP_ACCESS(dest, type, store, ignore, storeValue) {
+  //if (dest === A_NUMBER) Module.print ([dest, type, store, ignore, storeValue] + ' ' + new Error().stack); // Something like this may be useful, in debugging
 
-  assert(dest >= STACK_ROOT, 'segmentation fault: null pointer, or below normal memory');
+  assert(dest > 0, 'segmentation fault');
 
 #if USE_TYPED_ARRAYS
   // When using typed arrays, reads over the top of TOTAL_MEMORY will fail silently, so we must
   // correct that by growing TOTAL_MEMORY as needed. Without typed arrays, memory is a normal
   // JS array so it will work (potentially slowly, depending on the engine).
-  assert(ignore || dest < STATICTOP);
-  assert(ignore || STATICTOP <= TOTAL_MEMORY);
+  assert(ignore || dest < Math.max(DYNAMICTOP, STATICTOP));
+  assert(ignore || DYNAMICTOP <= TOTAL_MEMORY);
 #endif
 
 #if USE_TYPED_ARRAYS == 2
@@ -88,7 +97,7 @@ function SAFE_HEAP_STORE(dest, value, type, ignore) {
   }
   //if (!ignore && (value === Infinity || value === -Infinity || isNaN(value))) throw [value, typeof value, new Error().stack];
 
-  SAFE_HEAP_ACCESS(dest, type, true, ignore);
+  SAFE_HEAP_ACCESS(dest, type, true, ignore, value);
   if (dest in HEAP_WATCHED) {
     Module.print((new Error()).stack);
     throw "Bad store!" + dest;
@@ -145,6 +154,15 @@ function SAFE_HEAP_COPY_HISTORY(dest, src) {
 #endif
   HEAP_HISTORY[dest] = HEAP_HISTORY[src];
   SAFE_HEAP_ACCESS(dest, HEAP_HISTORY[dest] || null, true, false);
+}
+
+function SAFE_HEAP_FILL_HISTORY(from, to, type) {
+#if SAFE_HEAP_LOG
+  Module.print('SAFE_HEAP fill: ' + [from, to, type]);
+#endif
+  for (var i = from; i < to; i++) {
+    HEAP_HISTORY[i] = type;
+  }
 }
 
 //==========================================
@@ -217,10 +235,13 @@ var START_TIME = Date.now();
 //========================================
 
 var __THREW__ = 0; // Used in checking for thrown exceptions.
+#if ASM_JS == 0
 var setjmpId = 1; // Used in setjmp/longjmp
 var setjmpLabels = {};
+#endif
 
-var ABORT = false;
+var ABORT = false; // whether we are quitting the application. no code should run after this. set in exit() and abort()
+var EXITSTATUS = 0;
 
 var undef = 0;
 // tempInt is used for 32-bit signed values or smaller. tempBigInt is used
@@ -230,12 +251,6 @@ var tempValue, tempInt, tempBigInt, tempInt2, tempBigInt2, tempPair, tempBigIntI
 var tempI64, tempI64b;
 var tempRet0, tempRet1, tempRet2, tempRet3, tempRet4, tempRet5, tempRet6, tempRet7, tempRet8, tempRet9;
 #endif
-
-function abort(text) {
-  Module.print(text + ':\n' + (new Error).stack);
-  ABORT = true;
-  throw "Assertion: " + text;
-}
 
 function assert(condition, text) {
   if (!condition) {
@@ -256,7 +271,7 @@ var globalScope = this;
 //
 // @param ident      The name of the C function (note that C++ functions will be name-mangled - use extern "C")
 // @param returnType The return type of the function, one of the JS types 'number', 'string' or 'array' (use 'number' for any C pointer, and
-//                   'array' for JavaScript arrays and typed arrays).
+//                   'array' for JavaScript arrays and typed arrays; note that arrays are 8-bit).
 // @param argTypes   An array of the types of arguments for the function (if there are no arguments, this can be ommitted). Types are as in returnType,
 //                   except that 'array' is not possible (there is no way for us to know the length of the array)
 // @param args       An array of the arguments to the function, as native JS values (as in returnType)
@@ -270,7 +285,7 @@ Module["ccall"] = ccall;
 // Returns the C function with a specified identifier (for C++, you need to do manual name mangling)
 function getCFunc(ident) {
   try {
-    var func = globalScope['Module']['_' + ident]; // closure exported function
+    var func = Module['_' + ident]; // closure exported function
     if (!func) func = eval('_' + ident); // explicit lookup
   } catch(e) {
   }
@@ -406,19 +421,13 @@ Module['getValue'] = getValue;
 var ALLOC_NORMAL = 0; // Tries to use _malloc()
 var ALLOC_STACK = 1; // Lives for the duration of the current function call
 var ALLOC_STATIC = 2; // Cannot be freed
-var ALLOC_NONE = 3; // Do not allocate
+var ALLOC_DYNAMIC = 3; // Cannot be freed except through sbrk
+var ALLOC_NONE = 4; // Do not allocate
 Module['ALLOC_NORMAL'] = ALLOC_NORMAL;
 Module['ALLOC_STACK'] = ALLOC_STACK;
 Module['ALLOC_STATIC'] = ALLOC_STATIC;
+Module['ALLOC_DYNAMIC'] = ALLOC_DYNAMIC;
 Module['ALLOC_NONE'] = ALLOC_NONE;
-
-// Simple unoptimized memset - necessary during startup
-var _memset = function(ptr, value, num) {
-  var stop = ptr + num;
-  while (ptr < stop) {
-    {{{ makeSetValue('ptr++', 0, 'value', 'i8', null, true) }}};
-  }
-}
 
 // allocate(): This is for internal use. You can use it yourself as well, but the interface
 //             is a little tricky (see docs right below). The reason is that it is optimized
@@ -449,17 +458,32 @@ function allocate(slab, types, allocator, ptr) {
   if (allocator == ALLOC_NONE) {
     ret = ptr;
   } else {
-    ret = [_malloc, Runtime.stackAlloc, Runtime.staticAlloc][allocator === undefined ? ALLOC_STATIC : allocator](Math.max(size, singleType ? 1 : types.length));
+    ret = [_malloc, Runtime.stackAlloc, Runtime.staticAlloc, Runtime.dynamicAlloc][allocator === undefined ? ALLOC_STATIC : allocator](Math.max(size, singleType ? 1 : types.length));
   }
 
   if (zeroinit) {
-    _memset(ret, 0, size);
+    var ptr = ret, stop;
+#if USE_TYPED_ARRAYS == 2
+    assert((ret & 3) == 0);
+    stop = ret + (size & ~3);
+    for (; ptr < stop; ptr += 4) {
+      {{{ makeSetValue('ptr', '0', '0', 'i32', null, true) }}};
+    }
+#endif
+    stop = ret + size;
+    while (ptr < stop) {
+      {{{ makeSetValue('ptr++', '0', '0', 'i8', null, true) }}};
+    }
     return ret;
   }
 
 #if USE_TYPED_ARRAYS == 2
   if (singleType === 'i8') {
-    HEAPU8.set(new Uint8Array(slab), ret);
+    if (slab.subarray || slab.slice) {
+      HEAPU8.set(slab, ret);
+    } else {
+      HEAPU8.set(new Uint8Array(slab), ret);
+    }
     return ret;
   }
 #endif
@@ -500,33 +524,122 @@ function allocate(slab, types, allocator, ptr) {
 Module['allocate'] = allocate;
 
 function Pointer_stringify(ptr, /* optional */ length) {
-  var utf8 = new Runtime.UTF8Processor();
-  var nullTerminated = typeof(length) == "undefined";
-  var ret = "";
-  var i = 0;
+  // TODO: use TextDecoder
+  // Find the length, and check for UTF while doing so
+  var hasUtf = false;
   var t;
+  var i = 0;
   while (1) {
 #if ASSERTIONS
-  assert(i < TOTAL_MEMORY);
+    assert(ptr + i < TOTAL_MEMORY);
 #endif
     t = {{{ makeGetValue('ptr', 'i', 'i8', 0, 1) }}};
-    if (nullTerminated && t == 0) break;
+    if (t >= 128) hasUtf = true;
+    else if (t == 0 && !length) break;
+    i++;
+    if (length && i == length) break;
+  }
+  if (!length) length = i;
+
+  var ret = '';
+
+#if USE_TYPED_ARRAYS == 2
+  if (!hasUtf) {
+    var MAX_CHUNK = 1024; // split up into chunks, because .apply on a huge string can overflow the stack
+    var curr;
+    while (length > 0) {
+      curr = String.fromCharCode.apply(String, HEAPU8.subarray(ptr, ptr + Math.min(length, MAX_CHUNK)));
+      ret = ret ? ret + curr : curr;
+      ptr += MAX_CHUNK;
+      length -= MAX_CHUNK;
+    }
+    return ret;
+  }
+#endif
+
+  var utf8 = new Runtime.UTF8Processor();
+  for (i = 0; i < length; i++) {
+#if ASSERTIONS
+    assert(ptr + i < TOTAL_MEMORY);
+#endif
+    t = {{{ makeGetValue('ptr', 'i', 'i8', 0, 1) }}};
     ret += utf8.processCChar(t);
-    i += 1;
-    if (!nullTerminated && i == length) break;
   }
   return ret;
 }
 Module['Pointer_stringify'] = Pointer_stringify;
 
-function Array_stringify(array) {
-  var ret = "";
-  for (var i = 0; i < array.length; i++) {
-    ret += String.fromCharCode(array[i]);
+// Given a pointer 'ptr' to a null-terminated UTF16LE-encoded string in the emscripten HEAP, returns
+// a copy of that string as a Javascript String object.
+function UTF16ToString(ptr) {
+  var i = 0;
+
+  var str = '';
+  while (1) {
+    var codeUnit = {{{ makeGetValue('ptr', 'i*2', 'i16') }}};
+    if (codeUnit == 0)
+      return str;
+    ++i;
+    // fromCharCode constructs a character from a UTF-16 code unit, so we can pass the UTF16 string right through.
+    str += String.fromCharCode(codeUnit);
   }
-  return ret;
 }
-Module['Array_stringify'] = Array_stringify;
+Module['UTF16ToString'] = UTF16ToString;
+
+// Copies the given Javascript String object 'str' to the emscripten HEAP at address 'outPtr', 
+// null-terminated and encoded in UTF16LE form. The copy will require at most (str.length*2+1)*2 bytes of space in the HEAP.
+function stringToUTF16(str, outPtr) {
+  for(var i = 0; i < str.length; ++i) {
+    // charCodeAt returns a UTF-16 encoded code unit, so it can be directly written to the HEAP.
+    var codeUnit = str.charCodeAt(i); // possibly a lead surrogate
+    {{{ makeSetValue('outPtr', 'i*2', 'codeUnit', 'i16') }}}
+  }
+  // Null-terminate the pointer to the HEAP.
+  {{{ makeSetValue('outPtr', 'str.length*2', 0, 'i16') }}}
+}
+Module['stringToUTF16'] = stringToUTF16;
+
+// Given a pointer 'ptr' to a null-terminated UTF32LE-encoded string in the emscripten HEAP, returns
+// a copy of that string as a Javascript String object.
+function UTF32ToString(ptr) {
+  var i = 0;
+
+  var str = '';
+  while (1) {
+    var utf32 = {{{ makeGetValue('ptr', 'i*4', 'i32') }}};
+    if (utf32 == 0)
+      return str;
+    ++i;
+    // Gotcha: fromCharCode constructs a character from a UTF-16 encoded code (pair), not from a Unicode code point! So encode the code point to UTF-16 for constructing.
+    if (utf32 >= 0x10000) {
+      var ch = utf32 - 0x10000;
+      str += String.fromCharCode(0xD800 | (ch >> 10), 0xDC00 | (ch & 0x3FF));
+    } else {
+      str += String.fromCharCode(utf32);
+    }
+  }
+}
+Module['UTF32ToString'] = UTF32ToString;
+
+// Copies the given Javascript String object 'str' to the emscripten HEAP at address 'outPtr', 
+// null-terminated and encoded in UTF32LE form. The copy will require at most (str.length+1)*4 bytes of space in the HEAP,
+// but can use less, since str.length does not return the number of characters in the string, but the number of UTF-16 code units in the string.
+function stringToUTF32(str, outPtr) {
+  var iChar = 0;
+  for(var iCodeUnit = 0; iCodeUnit < str.length; ++iCodeUnit) {
+    // Gotcha: charCodeAt returns a 16-bit word that is a UTF-16 encoded code unit, not a Unicode code point of the character! We must decode the string to UTF-32 to the heap.
+    var codeUnit = str.charCodeAt(iCodeUnit); // possibly a lead surrogate
+    if (codeUnit >= 0xD800 && codeUnit <= 0xDFFF) {
+      var trailSurrogate = str.charCodeAt(++iCodeUnit);
+      codeUnit = 0x10000 + ((codeUnit & 0x3FF) << 10) | (trailSurrogate & 0x3FF);
+    }
+    {{{ makeSetValue('outPtr', 'iChar*4', 'codeUnit', 'i32') }}}
+    ++iChar;
+  }
+  // Null-terminate the pointer to the HEAP.
+  {{{ makeSetValue('outPtr', 'iChar*4', 0, 'i32') }}}
+}
+Module['stringToUTF32'] = stringToUTF32;
 
 // Memory management
 
@@ -546,26 +659,29 @@ var FHEAP;
 var HEAP8, HEAPU8, HEAP16, HEAPU16, HEAP32, HEAPU32, HEAPF32, HEAPF64;
 #endif
 
-var STACK_ROOT, STACKTOP, STACK_MAX;
-var STATICTOP;
+var STATIC_BASE = 0, STATICTOP = 0, staticSealed = false; // static area
+var STACK_BASE = 0, STACKTOP = 0, STACK_MAX = 0; // stack area
+var DYNAMIC_BASE = 0, DYNAMICTOP = 0; // dynamic area handled by sbrk
+
 #if USE_TYPED_ARRAYS
 function enlargeMemory() {
 #if ALLOW_MEMORY_GROWTH == 0
 #if ASM_JS == 0
-  abort('Cannot enlarge memory arrays. Either (1) compile with -s TOTAL_MEMORY=X with X higher than the current value, (2) compile with ALLOW_MEMORY_GROWTH which adjusts the size at runtime but prevents some optimizations, or (3) set Module.TOTAL_MEMORY before the program runs.');
+  abort('Cannot enlarge memory arrays. Either (1) compile with -s TOTAL_MEMORY=X with X higher than the current value ' + TOTAL_MEMORY + ', (2) compile with ALLOW_MEMORY_GROWTH which adjusts the size at runtime but prevents some optimizations, or (3) set Module.TOTAL_MEMORY before the program runs.');
 #else
-  abort('Cannot enlarge memory arrays in asm.js. Compile with -s TOTAL_MEMORY=X with X higher than the current value.');
+  abort('Cannot enlarge memory arrays in asm.js. Either (1) compile with -s TOTAL_MEMORY=X with X higher than the current value ' + TOTAL_MEMORY + ', or (2) set Module.TOTAL_MEMORY before the program runs.');
 #endif
 #else
-  // TOTAL_MEMORY is the current size of the actual array, and STATICTOP is the new top.
+  // TOTAL_MEMORY is the current size of the actual array, and DYNAMICTOP is the new top.
 #if ASSERTIONS
-  Module.printErr('Warning: Enlarging memory arrays, this is not fast, and ALLOW_MEMORY_GROWTH is not fully tested with all optimizations on! ' + [STATICTOP, TOTAL_MEMORY]); // We perform safe elimination instead of elimination in this mode, but if you see this error, try to disable it and other optimizations entirely
-  assert(STATICTOP >= TOTAL_MEMORY);
+  Module.printErr('Warning: Enlarging memory arrays, this is not fast, and ALLOW_MEMORY_GROWTH is not fully tested with all optimizations on! ' + [DYNAMICTOP, TOTAL_MEMORY]); // We perform safe elimination instead of elimination in this mode, but if you see this error, try to disable it and other optimizations entirely
+  assert(DYNAMICTOP >= TOTAL_MEMORY);
   assert(TOTAL_MEMORY > 4); // So the loop below will not be infinite
 #endif
-  while (TOTAL_MEMORY <= STATICTOP) { // Simple heuristic. Override enlargeMemory() if your program has something more optimal for it
+  while (TOTAL_MEMORY <= DYNAMICTOP) { // Simple heuristic. Override enlargeMemory() if your program has something more optimal for it
     TOTAL_MEMORY = alignMemoryPage(2*TOTAL_MEMORY);
   }
+  assert(TOTAL_MEMORY <= Math.pow(2, 30)); // 2^30==1GB is a practical maximum - 2^31 is already close to possible negative numbers etc.
 #if USE_TYPED_ARRAYS == 1
   var oldIHEAP = IHEAP;
   Module['HEAP'] = Module['IHEAP'] = HEAP = IHEAP = new Int32Array(TOTAL_MEMORY);
@@ -652,38 +768,13 @@ Module['HEAPF32'] = HEAPF32;
 Module['HEAPF64'] = HEAPF64;
 #endif
 
-STACK_ROOT = STACKTOP = Runtime.alignMemory(1);
-STACK_MAX = TOTAL_STACK; // we lose a little stack here, but TOTAL_STACK is nice and round so use that as the max
-
-#if USE_TYPED_ARRAYS == 2
-var tempDoublePtr = Runtime.alignMemory(allocate(12, 'i8', ALLOC_STACK), 8);
-assert(tempDoublePtr % 8 == 0);
-function copyTempFloat(ptr) { // functions, because inlining this code increases code size too much
-  HEAP8[tempDoublePtr] = HEAP8[ptr];
-  HEAP8[tempDoublePtr+1] = HEAP8[ptr+1];
-  HEAP8[tempDoublePtr+2] = HEAP8[ptr+2];
-  HEAP8[tempDoublePtr+3] = HEAP8[ptr+3];
-}
-function copyTempDouble(ptr) {
-  HEAP8[tempDoublePtr] = HEAP8[ptr];
-  HEAP8[tempDoublePtr+1] = HEAP8[ptr+1];
-  HEAP8[tempDoublePtr+2] = HEAP8[ptr+2];
-  HEAP8[tempDoublePtr+3] = HEAP8[ptr+3];
-  HEAP8[tempDoublePtr+4] = HEAP8[ptr+4];
-  HEAP8[tempDoublePtr+5] = HEAP8[ptr+5];
-  HEAP8[tempDoublePtr+6] = HEAP8[ptr+6];
-  HEAP8[tempDoublePtr+7] = HEAP8[ptr+7];
-}
-#endif
-
-STATICTOP = STACK_MAX;
-assert(STATICTOP < TOTAL_MEMORY); // Stack must fit in TOTAL_MEMORY; allocations from here on may enlarge TOTAL_MEMORY
-
-var nullString = allocate(intArrayFromString('(null)'), 'i8', ALLOC_STACK);
-
 function callRuntimeCallbacks(callbacks) {
   while(callbacks.length > 0) {
     var callback = callbacks.shift();
+    if (typeof callback == 'function') {
+      callback();
+      continue;
+    }
     var func = callback.func;
     if (typeof func === 'number') {
       if (callback.arg === undefined) {
@@ -697,19 +788,74 @@ function callRuntimeCallbacks(callbacks) {
   }
 }
 
-var __ATINIT__ = []; // functions called during startup
-var __ATMAIN__ = []; // functions called when main() is to be run
-var __ATEXIT__ = []; // functions called during shutdown
+var __ATPRERUN__  = []; // functions called before the runtime is initialized
+var __ATINIT__    = []; // functions called during startup
+var __ATMAIN__    = []; // functions called when main() is to be run
+var __ATEXIT__    = []; // functions called during shutdown
+var __ATPOSTRUN__ = []; // functions called after the runtime has exited
 
-function initRuntime() {
+var runtimeInitialized = false;
+
+function preRun() {
+  // compatibility - merge in anything from Module['preRun'] at this time
+  if (Module['preRun']) {
+    if (typeof Module['preRun'] == 'function') Module['preRun'] = [Module['preRun']];
+    while (Module['preRun'].length) {
+      addOnPreRun(Module['preRun'].shift());
+    }
+  }
+  callRuntimeCallbacks(__ATPRERUN__);
+}
+
+function ensureInitRuntime() {
+  if (runtimeInitialized) return;
+  runtimeInitialized = true;
   callRuntimeCallbacks(__ATINIT__);
 }
+
 function preMain() {
   callRuntimeCallbacks(__ATMAIN__);
 }
+
 function exitRuntime() {
   callRuntimeCallbacks(__ATEXIT__);
 }
+
+function postRun() {
+  // compatibility - merge in anything from Module['postRun'] at this time
+  if (Module['postRun']) {
+    if (typeof Module['postRun'] == 'function') Module['postRun'] = [Module['postRun']];
+    while (Module['postRun'].length) {
+      addOnPostRun(Module['postRun'].shift());
+    }
+  }
+  callRuntimeCallbacks(__ATPOSTRUN__);
+}
+
+function addOnPreRun(cb) {
+  __ATPRERUN__.unshift(cb);
+}
+Module['addOnPreRun'] = Module.addOnPreRun = addOnPreRun;
+
+function addOnInit(cb) {
+  __ATINIT__.unshift(cb);
+}
+Module['addOnInit'] = Module.addOnInit = addOnInit;
+
+function addOnPreMain(cb) {
+  __ATMAIN__.unshift(cb);
+}
+Module['addOnPreMain'] = Module.addOnPreMain = addOnPreMain;
+
+function addOnExit(cb) {
+  __ATEXIT__.unshift(cb);
+}
+Module['addOnExit'] = Module.addOnExit = addOnExit;
+
+function addOnPostRun(cb) {
+  __ATPOSTRUN__.unshift(cb);
+}
+Module['addOnPostRun'] = Module.addOnPostRun = addOnPostRun;
 
 // Tools
 
@@ -766,7 +912,7 @@ Module['writeArrayToMemory'] = writeArrayToMemory;
 {{{ reSign }}}
 
 #if PRECISE_I32_MUL
-if (!Math.imul) Math.imul = function(a, b) {
+if (!Math['imul']) Math['imul'] = function(a, b) {
   var ah  = a >>> 16;
   var al = a & 0xffff;
   var bh  = b >>> 16;
@@ -774,9 +920,17 @@ if (!Math.imul) Math.imul = function(a, b) {
   return (al*bl + ((ah*bl + al*bh) << 16))|0;
 };
 #else
-Math.imul = function(a, b) {
+Math['imul'] = function(a, b) {
   return (a*b)|0; // fast but imprecise
 };
+#endif
+Math.imul = Math['imul'];
+
+#if TO_FLOAT32
+if (!Math['toFloat32']) Math['toFloat32'] = function(x) {
+  return x;
+};
+Math.toFloat32 = Math['toFloat32'];
 #endif
 
 // A counter of dependencies for calling run(). If we need to
@@ -788,8 +942,9 @@ Math.imul = function(a, b) {
 // the dependencies are met.
 var runDependencies = 0;
 var runDependencyTracking = {};
-var calledRun = false;
 var runDependencyWatcher = null;
+var dependenciesFulfilled = null; // overridden to take different actions when all run dependencies are fulfilled
+
 function addRunDependency(id) {
   runDependencies++;
   if (Module['monitorRunDependencies']) {
@@ -798,6 +953,7 @@ function addRunDependency(id) {
   if (id) {
     assert(!runDependencyTracking[id]);
     runDependencyTracking[id] = 1;
+#if ASSERTIONS
     if (runDependencyWatcher === null && typeof setInterval !== 'undefined') {
       // Check for missing dependencies every few seconds
       runDependencyWatcher = setInterval(function() {
@@ -812,8 +968,9 @@ function addRunDependency(id) {
         if (shown) {
           Module.printErr('(end of list)');
         }
-      }, 6000);
+      }, 10000);
     }
+#endif
   } else {
     Module.printErr('warning: run dependency added without ID');
   }
@@ -834,15 +991,36 @@ function removeRunDependency(id) {
     if (runDependencyWatcher !== null) {
       clearInterval(runDependencyWatcher);
       runDependencyWatcher = null;
-    } 
-    // If run has never been called, and we should call run (INVOKE_RUN is true, and Module.noInitialRun is not false)
-    if (!calledRun && shouldRunNow) run();
+    }
+    if (dependenciesFulfilled) {
+      dependenciesFulfilled();
+      dependenciesFulfilled = null;
+    }
   }
 }
 Module['removeRunDependency'] = removeRunDependency;
 
 Module["preloadedImages"] = {}; // maps url to image data
 Module["preloadedAudios"] = {}; // maps url to audio data
+
+#if PGO
+var PGOMonitor = {
+  called: {},
+  dump: function() {
+    var dead = [];
+    for (var i = 0; i < this.allGenerated.length; i++) {
+      var func = this.allGenerated[i];
+      if (!this.called[func]) dead.push(func);
+    }
+    Module.print('-s DEAD_FUNCTIONS=\'' + JSON.stringify(dead) + '\'\n');
+  }
+};
+Module['PGOMonitor'] = PGOMonitor;
+__ATEXIT__.push({ func: function() { PGOMonitor.dump() } });
+addOnPreRun(function() { addRunDependency('pgo') });
+#endif
+
+var memoryInitializer = null;
 
 // === Body ===
 

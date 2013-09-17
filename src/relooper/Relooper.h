@@ -41,6 +41,7 @@ struct Branch {
   void Render(Block *Target, bool SetLabel);
 };
 
+typedef std::set<Block*> BlockSet;
 typedef std::map<Block*, Branch*> BlockBranchMap;
 
 // Represents a basic block of code - some instructions that end with a
@@ -52,17 +53,16 @@ struct Block {
   // processed branches.
   // Blocks own the Branch objects they use, and destroy them when done.
   BlockBranchMap BranchesOut;
-  BlockBranchMap BranchesIn; // TODO: make this just a list of Incoming, without branch info - should be just on BranchesOut
+  BlockSet BranchesIn;
   BlockBranchMap ProcessedBranchesOut;
-  BlockBranchMap ProcessedBranchesIn;
+  BlockSet ProcessedBranchesIn;
   Shape *Parent; // The shape we are directly inside
   int Id; // A unique identifier
   const char *Code; // The string representation of the code in this block. Owning pointer (we copy the input)
-  Block *DefaultTarget; // The block we branch to without checking the condition, if none of the other conditions held.
-                        // Since each block *must* branch somewhere, this must be set
+  const char *BranchVar; // If we have more than one branch out, the variable whose value determines where we go
   bool IsCheckedMultipleEntry; // If true, we are a multiple entry, so reaching us requires setting the label variable
 
-  Block(const char *CodeInit);
+  Block(const char *CodeInit, const char *BranchVarInit);
   ~Block();
 
   void AddBranchTo(Block *Target, const char *Condition, const char *Code=NULL);
@@ -100,6 +100,7 @@ class LoopShape;
 struct Shape {
   int Id; // A unique identifier. Used to identify loops, labels are Lx where x is the Id.
   Shape *Next; // The shape that will appear in the code right after this one
+  Shape *Natural; // The shape that control flow gets to naturally (if there is Next, then this is Next)
 
   enum ShapeType {
     Simple,
@@ -205,12 +206,12 @@ struct Relooper {
   static void SetAsmJSMode(int On);
 };
 
-typedef std::set<Block*> BlockSet;
 typedef std::map<Block*, BlockSet> BlockBlockSetMap;
 
 #if DEBUG
 struct Debugging {
   static void Dump(BlockSet &Blocks, const char *prefix=NULL);
+  static void Dump(Shape *S, const char *prefix=NULL);
 };
 #endif
 
@@ -235,7 +236,7 @@ extern "C" {
 RELOOPERDLL_API void  rl_set_output_buffer(char *buffer, int size);
 RELOOPERDLL_API void  rl_make_output_buffer(int size);
 RELOOPERDLL_API void  rl_set_asm_js_mode(int on);
-RELOOPERDLL_API void *rl_new_block(const char *text);
+RELOOPERDLL_API void *rl_new_block(const char *text, const char *branch_var);
 RELOOPERDLL_API void  rl_delete_block(void *block);
 RELOOPERDLL_API void  rl_block_add_branch_to(void *from, void *to, const char *condition, const char *code);
 RELOOPERDLL_API void *rl_new_relooper();

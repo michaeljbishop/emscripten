@@ -122,16 +122,19 @@ function intertyper(data, sidePass, baseLineNums) {
               SKIP_STACK_IN_SMALL = 0;
             }
 
-            unparsedBundles.push({
-              intertype: 'unparsedFunction',
-              // We need this early, to know basic function info - ident, params, varargs
-              ident: toNiceIdent(func.ident),
-              params: func.params,
-              returnType: func.returnType,
-              hasVarArgs: func.hasVarArgs,
-              lineNum: currFunctionLineNum,
-              lines: currFunctionLines
-            });
+            var ident = toNiceIdent(func.ident);
+            if (!(ident in DEAD_FUNCTIONS)) {
+              unparsedBundles.push({
+                intertype: 'unparsedFunction',
+                // We need this early, to know basic function info - ident, params, varargs
+                ident: ident,
+                params: func.params,
+                returnType: func.returnType,
+                hasVarArgs: func.hasVarArgs,
+                lineNum: currFunctionLineNum,
+                lines: currFunctionLines
+              });
+            }
             currFunctionLines = [];
           }
         }
@@ -333,6 +336,8 @@ function intertyper(data, sidePass, baseLineNums) {
             return 'InsertValue';
           if (tokensLength >= 3 && token0Text == 'phi')
             return 'Phi';
+          if (tokensLength >= 3 && token0Text == 'va_arg')
+            return 'va_arg';
           if (tokensLength >= 3 && token0Text == 'landingpad')
             return 'Landingpad';
           if (token0Text == 'fence')
@@ -355,11 +360,22 @@ function intertyper(data, sidePass, baseLineNums) {
             warn('Ignoring module asm: ' + item.tokens[2].text);
             return '/dev/null';
           }
+          if (token0Text == 'attributes')
+            return '/dev/null';
         }
         if (tokensLength >= 3 && (token0Text == 'call' || token1Text == 'call'))
           return 'Call';
-        if (token0Text == 'target')
+        if (token0Text == 'target') {
+          if (token1Text == 'triple') {
+            var triple = item.tokens[3].text;
+            triple = triple.substr(1, triple.length-2);
+            var expected = TARGET_LE32 ? 'le32-unknown-nacl' : 'i386-pc-linux-gnu';
+            if (triple !== expected) {
+              warn('using an unexpected LLVM triple: ' + [triple, ' !== ', expected] + ' (are you using emcc for everything and not clang?)');
+            }
+          }
           return '/dev/null';
+        }
         if (token0Text == ';')
           return '/dev/null';
         if (tokensLength >= 3 && token0Text == 'invoke')
@@ -497,7 +513,8 @@ function intertyper(data, sidePass, baseLineNums) {
       } else {
         // variable
         var ident = item.tokens[0].text;
-        var private_ = findTokenText(item, 'private') >= 0;
+        var private_ = findTokenText(item, 'private') >= 0 || findTokenText(item, 'internal') >= 0;
+        var named = findTokenText(item, 'unnamed_addr') < 0;
         cleanOutTokens(LLVM.GLOBAL_MODIFIERS, item.tokens, [2, 3]);
         var external = false;
         if (item.tokens[2].text === 'external') {
@@ -511,6 +528,7 @@ function intertyper(data, sidePass, baseLineNums) {
           type: item.tokens[2].text,
           external: external,
           private_: private_,
+          named: named,
           lineNum: item.lineNum
         };
         if (!NAMED_GLOBALS) {
@@ -532,12 +550,17 @@ function intertyper(data, sidePass, baseLineNums) {
             });
           }
         } else if (!external) {
-          if (item.tokens[3].text == 'c')
-            item.tokens.splice(3, 1);
-          if (item.tokens[3].text in PARSABLE_LLVM_FUNCTIONS) {
-            ret.value = parseLLVMFunctionCall(item.tokens.slice(2));
+          if (item.tokens[3] && item.tokens[3].text != ';') {
+            if (item.tokens[3].text == 'c') {
+              item.tokens.splice(3, 1);
+            }
+            if (item.tokens[3].text in PARSABLE_LLVM_FUNCTIONS) {
+              ret.value = parseLLVMFunctionCall(item.tokens.slice(2));
+            } else {
+              ret.value = scanConst(item.tokens[3], ret.type);
+            }
           } else {
-            ret.value = scanConst(item.tokens[3], ret.type);
+            ret.value = { intertype: 'value', ident: '0', value: '0', type: ret.type };
           }
         }
         return [ret];
@@ -677,17 +700,33 @@ function intertyper(data, sidePass, baseLineNums) {
     item.type = item.tokens[1].text;
     Types.needAnalysis[item.type] = 0;
     while (['@', '%'].indexOf(item.tokens[2].text[0]) == -1 && !(item.tokens[2].text in PARSABLE_LLVM_FUNCTIONS) &&
-           item.tokens[2].text != 'null' && item.tokens[2].text != 'asm') {
+           item.tokens[2].text != 'null' && item.tokens[2].text != 'asm' && item.tokens[2].text != 'undef') {
       assert(item.tokens[2].text != 'asm', 'Inline assembly cannot be compiled to JavaScript!');
       item.tokens.splice(2, 1);
     }
     var tokensLeft = item.tokens.slice(2);
     item.ident = eatLLVMIdent(tokensLeft);
     if (item.ident == 'asm') {
+      if (ASM_JS) {
+        Types.hasInlineJS = true;
+        warnOnce('inline JavaScript (asm, EM_ASM) will cause the code to no longer fall in the asm.js subset of JavaScript, which can reduce performance - consider using emscripten_run_script');
+      }
+      assert(TARGET_LE32, 'inline js is only supported in le32');
       // Inline assembly is just JavaScript that we paste into the code
       item.intertype = 'value';
       if (tokensLeft[0].text == 'sideeffect') tokensLeft.splice(0, 1);
       item.ident = tokensLeft[0].text.substr(1, tokensLeft[0].text.length-2) || ';'; // use ; for empty inline assembly
+      assert((item.tokens[5].text.match(/=/g) || []).length <= 1, 'we only support at most 1 exported variable from inline js: ' + item.ident);
+      var i = 0;
+      var params = [], args = [];
+      splitTokenList(tokensLeft[3].item.tokens).map(function(element) {
+        var ident = toNiceIdent(element[1].text);
+        var type = element[0].text;
+        params.push('$' + (i++));
+        args.push(ident);
+      });
+      if (item.assignTo) item.ident = 'return ' + item.ident;
+      item.ident = '(function(' + params + ') { ' + item.ident + ' })(' + args + ');';
       return { forward: null, ret: [item], item: item };
     } 
     if (item.ident.substr(-2) == '()') {
@@ -741,10 +780,12 @@ function intertyper(data, sidePass, baseLineNums) {
     processItem: function(item) {
       item.intertype = 'atomic';
       if (item.tokens[0].text == 'atomicrmw') {
+        if (item.tokens[1].text == 'volatile') item.tokens.splice(1, 1);
         item.op = item.tokens[1].text;
         item.tokens.splice(1, 1);
       } else {
         assert(item.tokens[0].text == 'cmpxchg')
+        if (item.tokens[1].text == 'volatile') item.tokens.splice(1, 1);
         item.op = 'cmpxchg';
       }
       var last = getTokenIndexByText(item.tokens, ';');
@@ -809,6 +850,16 @@ function intertyper(data, sidePass, baseLineNums) {
         };
         return ret;
       }).filter(function(param) { return param.value && param.value.ident != 'undef' });
+      this.forwardItem(item, 'Reintegrator');
+    }
+  });
+  // 'phi'
+  substrate.addActor('va_arg', {
+    processItem: function(item) {
+      item.intertype = 'va_arg';
+      var segments = splitTokenList(item.tokens.slice(1));
+      item.type = segments[1][0].text;
+      item.value = parseLLVMSegment(segments[0]);
       this.forwardItem(item, 'Reintegrator');
     }
   });

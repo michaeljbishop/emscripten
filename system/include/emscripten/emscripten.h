@@ -1,3 +1,6 @@
+#ifndef __emscripten_h__
+#define __emscripten_h__
+
 /**
  * This file contains a few useful things for compiling C/C++ code
  * with Emscripten, an LLVM-to-JavaScript compiler.
@@ -16,15 +19,24 @@ extern "C" {
 #endif
 
 /*
- * Forces LLVM to not dead-code-eliminate a function. Note that
- * closure may still eliminate it at the JS level, for which you
- * should use EXPORTED_FUNCTIONS (see settings.js).
+ * Convenient syntax for inline assembly/js. Allows stuff like
  *
- * **DEPRECATED**: Use EXPORTED_FUNCTIONS instead, which will work
- *                 with closure, asm.js, etc. For example
- *                   -s EXPORTED_FUNCTIONS=["_main", "myfunc"]
+ *    EM_ASM(window.alert('hai'));
+ *
+ * Note: double-quotes (") are not supported, but you can use
+ *       single-quotes (') in js anyhow.
  */
-/* #define EMSCRIPTEN_KEEPALIVE __attribute__((used)) */
+#define EM_ASM(...) asm(#__VA_ARGS__)
+
+/*
+ * Forces LLVM to not dead-code-eliminate a function. Note that
+ * you still need to use EXPORTED_FUNCTIONS so it stays alive
+ * in JS, e.g.
+ *     emcc -s EXPORTED_FUNCTIONS=["_main", "_myfunc"]
+ * and in the source file
+ *     void EMSCRIPTEN_KEEPALIVE myfunc() {..}
+ */
+#define EMSCRIPTEN_KEEPALIVE __attribute__((used))
 
 /*
  * Interface to the underlying JS engine. This function will
@@ -33,7 +45,25 @@ extern "C" {
 extern void emscripten_run_script(const char *script);
 extern int emscripten_run_script_int(const char *script);
 extern char *emscripten_run_script_string(const char *script); // uses a single buffer - shared between calls!
+
+/*
+ * Asynchronously run a script, after a specified amount of
+ * time.
+ */
 extern void emscripten_async_run_script(const char *script, int millis);
+
+/*
+ * Asynchronously loads a script from a URL.
+ *
+ * This integrates with the run dependencies system, so your
+ * script can call addRunDependency multiple times, prepare
+ * various asynchronous tasks, and call removeRunDependency
+ * on them; when all are complete (or there were no run
+ * dependencies to begin with), onload is called. An example use
+ * for this is to load an asset module, that is, the output of the
+ * file packager.
+ */
+extern void emscripten_async_load_script(const char *script, void (*onload)(), void (*onerror)());
 
 /*
  * Set a C function as the main event loop. The JS environment
@@ -60,7 +90,7 @@ extern void emscripten_async_run_script(const char *script, int millis);
  *    that execution continues normally. Note that in both cases
  *    we do not run global destructors, atexit, etc., since we
  *    know the main loop will still be running, but if we do
- *    not simulate an infinite loop then the stack will be unwinded.
+ *    not simulate an infinite loop then the stack will be unwound.
  *    That means that if simulate_infinite_loop is false, and
  *    you created an object on the stack, it will be cleaned up
  *    before the main loop will be called the first time.
@@ -136,6 +166,14 @@ inline void emscripten_async_call(void (*func)(void *), void *arg, int millis) {
 #endif
 
 /*
+ * Exits the program immediately, but leaves the runtime alive
+ * so that you can continue to run code later (so global destructors
+ * etc. are not run). This is implicitly performed when you do
+ * an asynchronous operation like emscripten_async_call.
+ */
+extern void emscripten_exit_with_live_runtime();
+
+/*
  * Hide the OS mouse cursor over the canvas. Note that SDL's
  * SDL_ShowCursor command shows and hides the SDL cursor, not
  * the OS one. This command is useful to hide the OS cursor
@@ -148,6 +186,12 @@ void emscripten_hide_mouse();
  * on the Emscripten web page.
  */
 void emscripten_set_canvas_size(int width, int height);
+
+/*
+ * Get the current pixel width and height of the <canvas> element
+ * as well as whether the canvas is fullscreen or not.
+ */
+void emscripten_get_canvas_size(int *width, int *height, int *isFullscreen);
 
 /*
  * Returns the highest-precision representation of the
@@ -215,7 +259,7 @@ void emscripten_async_wget_data(const char* url, void *arg, void (*onload)(void*
  * More feature-complete version of emscripten_async_wget. Note:
  * this version is experimental.
  *
- * The requestype is 'GET' or 'POST',
+ * The requesttype is 'GET' or 'POST',
  * If is post request, param is the post parameter 
  * like key=value&key2=value2.
  * The param 'arg' is a pointer will be pass to the callback
@@ -345,7 +389,33 @@ extern void EMSCRIPTEN_PROFILE_INIT(int max);
 extern void EMSCRIPTEN_PROFILE_BEGIN(int id);
 extern void EMSCRIPTEN_PROFILE_END(int id);
 
+/*
+ * jcache-friendly printf. printf in general will receive a string
+ * literal, which becomes a global constant, which invalidates all
+ * jcache entries. emscripten_jcache_printf is parsed before
+ * clang into something without any string literals, so you can
+ * add such printouts to your code and only the (chunk containing
+ * the) function you modify will be invalided and recompiled.
+ *
+ * Note in particular that you need to already have a call to this
+ * function in your code *before* you add one and do an incremental
+ * build, so that adding an external reference does not invalidate
+ * everything.
+ *
+ * This function assumes the first argument is a string literal
+ * (otherwise you don't need it), and the other arguments, if any,
+ * are neither strings nor complex expressions (but just simple
+ * variables). (You can create a variable to store a complex
+ * expression on the previous line, if necessary.)
+ */
+#ifdef __cplusplus
+void emscripten_jcache_printf(const char *format, ...);
+void emscripten_jcache_printf_(...); /* internal use */
+#endif
+
 #ifdef __cplusplus
 }
 #endif
+
+#endif // __emscripten_h__
 

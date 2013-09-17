@@ -85,6 +85,13 @@ function warnOnce(a, msg) {
   }
 }
 
+var abortExecution = false;
+
+function error(msg) {
+  abortExecution = true;
+  printErr('Error: ' + msg);
+}
+
 function dedup(items, ident) {
   var seen = {};
   if (ident) {
@@ -267,6 +274,15 @@ function set() {
 }
 var unset = keys;
 
+function numberedSet() {
+  var args = typeof arguments[0] === 'object' ? arguments[0] : arguments;
+  var ret = {};
+  for (var i = 0; i < args.length; i++) {
+    ret[args[i]] = i;
+  }
+  return ret;
+}
+
 function setSub(x, y) {
   var ret = set(keys(x));
   for (yy in y) {
@@ -282,9 +298,23 @@ function setIntersect(x, y) {
   var ret = {};
   for (xx in x) {
     if (xx in y) {
-      ret[xx] = true;
+      ret[xx] = 0;
     }
   }
+  return ret;
+}
+
+function setUnion(x, y) {
+  var ret = set(keys(x));
+  for (yy in y) {
+    ret[yy] = 0;
+  }
+  return ret;
+}
+
+function setSize(x) {
+  var ret = 0;
+  for (var xx in x) ret++;
   return ret;
 }
 

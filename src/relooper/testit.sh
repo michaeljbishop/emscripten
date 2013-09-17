@@ -1,3 +1,5 @@
+#!/bin/bash
+
 echo "test"
 ./test &> test.out
 diff -U 5 test.txt test.out

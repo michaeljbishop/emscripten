@@ -141,8 +141,13 @@ if (phase == 'pre') {
 
 if (settings_file) {
   var settings = JSON.parse(read(settings_file));
-  for (setting in settings) {
-    eval(setting + ' = ' + JSON.stringify(settings[setting]));
+  for (key in settings) {
+    var value = settings[key];
+    if (value[0] == '@') {
+      // response file type thing, workaround for large inputs: value is @path-to-file
+      value = JSON.parse(read(value.substr(1)));
+    }
+    eval(key + ' = ' + JSON.stringify(value));
   }
 }
 
@@ -164,7 +169,14 @@ EXPORTED_FUNCTIONS = set(EXPORTED_FUNCTIONS);
 EXPORTED_GLOBALS = set(EXPORTED_GLOBALS);
 EXCEPTION_CATCHING_WHITELIST = set(EXCEPTION_CATCHING_WHITELIST);
 
+DEAD_FUNCTIONS.forEach(function(dead) {
+  DEFAULT_LIBRARY_FUNCS_TO_INCLUDE.push(dead.substr(1));
+});
+DEAD_FUNCTIONS = numberedSet(DEAD_FUNCTIONS);
+
 RUNTIME_DEBUG = LIBRARY_DEBUG || GL_DEBUG;
+
+if (SAFE_HEAP) USE_BSS = 0; // must initialize heap for safe heap
 
 // Settings sanity checks
 
@@ -173,12 +185,12 @@ if (ASM_JS) {
   assert(!ALLOW_MEMORY_GROWTH, 'Cannot grow asm.js heap');
   assert((TOTAL_MEMORY&(TOTAL_MEMORY-1)) == 0, 'asm.js heap must be power of 2');
 }
-assert(!(!NAMED_GLOBALS && BUILD_AS_SHARED_LIB)); // shared libraries must have named globals
+assert(!(!NAMED_GLOBALS && BUILD_AS_SHARED_LIB), 'shared libraries must have named globals');
 
 // Output some info and warnings based on settings
 
 if (phase == 'pre') {
-  if (!MICRO_OPTS || !RELOOP || ASSERTIONS || CHECK_SIGNS || CHECK_OVERFLOWS || INIT_STACK || INIT_HEAP ||
+  if (!MICRO_OPTS || !RELOOP || ASSERTIONS || CHECK_SIGNS || CHECK_OVERFLOWS || INIT_HEAP ||
       !SKIP_STACK_IN_SMALL || SAFE_HEAP || !DISABLE_EXCEPTION_CATCHING) {
     print('// Note: Some Emscripten settings will significantly limit the speed of the generated code.');
   } else {
@@ -190,6 +202,8 @@ if (phase == 'pre') {
   }
 }
 
+if (VERBOSE) printErr('VERBOSE is on, this generates a lot of output and can slow down compilation');
+
 // Load compiler code
 
 load('framework.js');
@@ -198,7 +212,11 @@ load('parseTools.js');
 load('intertyper.js');
 load('analyzer.js');
 load('jsifier.js');
-if (RELOOP) load('relooper.js')
+if (RELOOP) {
+  RelooperModule = { TOTAL_MEMORY: ceilPowerOfTwo(2*RELOOPER_BUFFER_SIZE) };
+  load(RELOOPER);
+  assert(typeof Relooper != 'undefined');
+}
 globalEval(processMacros(preprocess(read('runtime.js'))));
 Runtime.QUANTUM_SIZE = QUANTUM_SIZE;
 

@@ -1,4 +1,6 @@
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <SDL/SDL.h>
 #include <SDL/SDL_image.h>
 #include <assert.h>
@@ -43,7 +45,7 @@ void ready(void *arg, const char *fileName) {
 
     testImage(seenName);
 
-    free(seenName); // As the API docs say, we are responsible for freeing the 'fake' names we are given
+    free((void*)seenName); // As the API docs say, we are responsible for freeing the 'fake' names we are given
 
     SDL_Flip(screen);
   }
@@ -56,7 +58,7 @@ int main() {
   printf("prepare..\n");
 
   #define SIZE 203164
-  FILE *f = open("screenshot.not", "rb");
+  FILE *f = fopen("screenshot.not", "rb");
   char *buffer = malloc(SIZE);
   fread(buffer, SIZE, 1, f);
   fclose(f);

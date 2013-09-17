@@ -260,8 +260,13 @@ var LibraryEGL = {
     }
 
     EGL.windowID = _glutCreateWindow();
-    EGL.setErrorCode(0x3000 /* EGL_SUCCESS */);
-    return 62004; // Magic ID for Emscripten EGLContext
+    if (EGL.windowID != 0) {
+      EGL.setErrorCode(0x3000 /* EGL_SUCCESS */);
+      return 62004; // Magic ID for Emscripten EGLContext
+    } else {
+      EGL.setErrorCode(0x3009 /* EGL_BAD_MATCH */); // By the EGL 1.4 spec, an implementation that does not support GLES2 (WebGL in this case), this error code is set.
+      return 0; /* EGL_NO_CONTEXT */
+    }
   },
 
   eglDestroyContext__deps: ['glutDestroyWindow', '$GL'],
@@ -318,10 +323,10 @@ var LibraryEGL = {
       // Existing Android implementation seems to do so at least.
       return 1;
     case 0x3057: // EGL_WIDTH
-      // TODO
+      {{{ makeSetValue('value', '0', 'Module.canvas.width', 'i32') }}};
       return 1;
     case 0x3056: // EGL_HEIGHT
-      // TODO
+      {{{ makeSetValue('value', '0', 'Module.canvas.height', 'i32') }}};
       return 1;
     case 0x3090: // EGL_HORIZONTAL_RESOLUTION
       {{{ makeSetValue('value', '0', '-1' /* EGL_UNKNOWN */, 'i32') }}};
@@ -483,6 +488,11 @@ var LibraryEGL = {
   // EGLAPI EGLBoolean EGLAPIENTRY eglSwapBuffers(EGLDisplay dpy, EGLSurface surface);
   eglSwapBuffers: function() {
     EGL.setErrorCode(0x3000 /* EGL_SUCCESS */);
+  },
+
+  eglGetProcAddress__deps: ['emscripten_GetProcAddress'],
+  eglGetProcAddress: function(name_) {
+    return _emscripten_GetProcAddress(Pointer_stringify(name_));
   },
 };
 
