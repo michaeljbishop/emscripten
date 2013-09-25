@@ -25,7 +25,13 @@ mergeInto(LibraryManager.library, {
     // This is set to false when the runtime is initialized, allowing you
     // to modify the filesystem freely before run() is called.
     ignorePermissions: true,
-    
+    trackingDelegate: {},
+    tracking: {
+      openFlags: {
+        READ: 1 << 0,
+        WRITE: 1 << 1
+      }
+    },
     ErrnoError: (function() {
       function ErrnoError(errno) {
         this.errno = errno;
@@ -580,6 +586,14 @@ mergeInto(LibraryManager.library, {
         // changed its name)
         FS.hashAddNode(old_node);
       }
+      if (FS.trackingDelegate) {
+        if (FS.trackingDelegate['didDeleteFile'])
+          FS.trackingDelegate['didDeleteFile'](old_path);
+        if (FS.trackingDelegate['didOpenFile'])
+          FS.trackingDelegate['didOpenFile'](new_path, FS.tracking.openFlags.WRITE);
+        if (FS.trackingDelegate['didCloseFile'])
+          FS.trackingDelegate['didCloseFile'](new_path);
+      }
     },
     rmdir: function(path) {
       var lookup = FS.lookupPath(path, { parent: true });
@@ -626,6 +640,9 @@ mergeInto(LibraryManager.library, {
       }
       parent.node_ops.unlink(parent, name);
       FS.destroyNode(node);
+      if (FS.trackingDelegate && FS.trackingDelegate['didDeleteFile']) {
+        FS.trackingDelegate['didDeleteFile'](path);
+      }
     },
     readlink: function(path) {
       var lookup = FS.lookupPath(path, { follow: false });
@@ -814,6 +831,14 @@ mergeInto(LibraryManager.library, {
           Module['printErr']('read file: ' + path);
         }
       }
+      if (FS.trackingDelegate && FS.trackingDelegate['didOpenFile']) {
+        var trackingFlags = 0;
+        if ((flags & {{{ cDefine('O_ACCMODE') }}}) !== {{{ cDefine('O_WRONLY') }}})
+          trackingFlags |= FS.tracking.openFlags.READ;
+        if ((flags & {{{ cDefine('O_ACCMODE') }}}) !== {{{ cDefine('O_RDONLY') }}})
+          trackingFlags |= FS.tracking.openFlags.WRITE;
+        FS.trackingDelegate['didOpenFile'](path, trackingFlags);
+      }
       return stream;
     },
     close: function(stream) {
@@ -825,6 +850,9 @@ mergeInto(LibraryManager.library, {
         throw e;
       } finally {
         FS.closeStream(stream.fd);
+        if (FS.trackingDelegate && stream.path && FS.trackingDelegate['didCloseFile']) {
+          FS.trackingDelegate['didCloseFile'](stream.path);
+        }
       }
     },
     llseek: function(stream, offset, whence) {
