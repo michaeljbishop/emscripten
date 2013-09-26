@@ -1196,7 +1196,7 @@ function makeGetValue(ptr, pos, type, noNeedFirst, unsigned, ignore, align, noSa
     var typeData = Types.types[type];
     var ret = [];
     for (var i = 0; i < typeData.fields.length; i++) {
-      ret.push('f' + i + ': ' + makeGetValue(ptr, pos + typeData.flatIndexes[i], typeData.fields[i], noNeedFirst, unsigned));
+      ret.push('f' + i + ': ' + makeGetValue(ptr, pos + typeData.flatIndexes[i], typeData.fields[i], noNeedFirst, unsigned, 0, 0, noSafe));
     }
     return '{ ' + ret.join(', ') + ' }';
   }
@@ -1204,8 +1204,8 @@ function makeGetValue(ptr, pos, type, noNeedFirst, unsigned, ignore, align, noSa
   // In double mode 1, in x86 we always assume unaligned because we can't trust that; otherwise in le32
   // we need this code path if we are not fully aligned.
   if (DOUBLE_MODE == 1 && USE_TYPED_ARRAYS == 2 && type == 'double' && (TARGET_X86 || align < 8)) {
-    return '(' + makeSetTempDouble(0, 'i32', makeGetValue(ptr, pos, 'i32', noNeedFirst, unsigned, ignore, align)) + ',' +
-                 makeSetTempDouble(1, 'i32', makeGetValue(ptr, getFastValue(pos, '+', Runtime.getNativeTypeSize('i32')), 'i32', noNeedFirst, unsigned, ignore, align)) + ',' +
+    return '(' + makeSetTempDouble(0, 'i32', makeGetValue(ptr, pos, 'i32', noNeedFirst, unsigned, ignore, align, noSafe)) + ',' +
+                 makeSetTempDouble(1, 'i32', makeGetValue(ptr, getFastValue(pos, '+', Runtime.getNativeTypeSize('i32')), 'i32', noNeedFirst, unsigned, ignore, align, noSafe)) + ',' +
             makeGetTempDouble(0, 'double') + ')';
   }
 
@@ -1218,12 +1218,12 @@ function makeGetValue(ptr, pos, type, noNeedFirst, unsigned, ignore, align, noSa
       if (isIntImplemented(type)) {
         if (bytes == 4 && align == 2) {
           // Special case that we can optimize
-          ret += makeGetValue(ptr, pos, 'i16', noNeedFirst, 2, ignore) + '|' +
-                 '(' + makeGetValue(ptr, getFastValue(pos, '+', 2), 'i16', noNeedFirst, 2, ignore) + '<<16)';
+          ret += makeGetValue(ptr, pos, 'i16', noNeedFirst, 2, ignore, 2, noSafe) + '|' +
+                 '(' + makeGetValue(ptr, getFastValue(pos, '+', 2), 'i16', noNeedFirst, 2, ignore, 2, noSafe) + '<<16)';
         } else { // XXX we cannot truly handle > 4... (in x86)
           ret = '';
           for (var i = 0; i < bytes; i++) {
-            ret += '(' + makeGetValue(ptr, getFastValue(pos, '+', i), 'i8', noNeedFirst, 1, ignore) + (i > 0 ? '<<' + (8*i) : '') + ')';
+            ret += '(' + makeGetValue(ptr, getFastValue(pos, '+', i), 'i8', noNeedFirst, 1, ignore, 1, noSafe) + (i > 0 ? '<<' + (8*i) : '') + ')';
             if (i < bytes-1) ret += '|';
           }
           ret = '(' + makeSignOp(ret, type, unsigned ? 'un' : 're', true);
@@ -1302,7 +1302,7 @@ function makeSetValue(ptr, pos, value, type, noNeedFirst, ignore, align, noSafe,
       value = range(typeData.fields.length).map(function(i) { return value + '.f' + i });
     }
     for (var i = 0; i < typeData.fields.length; i++) {
-      ret.push(makeSetValue(ptr, getFastValue(pos, '+', typeData.flatIndexes[i]), value[i], typeData.fields[i], noNeedFirst));
+      ret.push(makeSetValue(ptr, getFastValue(pos, '+', typeData.flatIndexes[i]), value[i], typeData.fields[i], noNeedFirst, 0, 0, noSafe));
     }
     return ret.join('; ');
   }
@@ -1329,17 +1329,17 @@ function makeSetValue(ptr, pos, value, type, noNeedFirst, ignore, align, noSafe,
         if (bytes == 4 && align == 2) {
           // Special case that we can optimize
           ret += 'tempBigInt=' + value + sep;
-          ret += makeSetValue(ptr, pos, 'tempBigInt&0xffff', 'i16', noNeedFirst, ignore, 2) + sep;
-          ret += makeSetValue(ptr, getFastValue(pos, '+', 2), 'tempBigInt>>16', 'i16', noNeedFirst, ignore, 2);
+          ret += makeSetValue(ptr, pos, 'tempBigInt&0xffff', 'i16', noNeedFirst, ignore, 2, noSafe) + sep;
+          ret += makeSetValue(ptr, getFastValue(pos, '+', 2), 'tempBigInt>>16', 'i16', noNeedFirst, ignore, 2, noSafe);
         } else {
           ret += 'tempBigInt=' + value + sep;
           for (var i = 0; i < bytes; i++) {
-            ret += makeSetValue(ptr, getFastValue(pos, '+', i), 'tempBigInt&0xff', 'i8', noNeedFirst, ignore, 1);
+            ret += makeSetValue(ptr, getFastValue(pos, '+', i), 'tempBigInt&0xff', 'i8', noNeedFirst, ignore, 1, noSafe);
             if (i < bytes-1) ret += sep + 'tempBigInt = tempBigInt>>8' + sep;
           }
         }
       } else {
-        ret += makeSetValue('tempDoublePtr', 0, value, type, noNeedFirst, ignore, 8, null, null, true) + sep;
+        ret += makeSetValue('tempDoublePtr', 0, value, type, noNeedFirst, ignore, 8, noSafe, null, true) + sep;
         ret += makeCopyValues(getFastValue(ptr, '+', pos), 'tempDoublePtr', Runtime.getNativeTypeSize(type), type, null, align, sep);
       }
       return ret;
@@ -1473,17 +1473,38 @@ var TWO_TWENTY = Math.pow(2, 20);
 // Tries to do as much as possible at compile time.
 // Leaves overflows etc. unhandled, *except* for integer multiply, in order to be efficient with Math.imul
 function getFastValue(a, op, b, type) {
-  a = a.toString();
-  b = b.toString();
+  //return '(' + a + ')' + op + '(' + b + ')';
   a = a == 'true' ? '1' : (a == 'false' ? '0' : a);
   b = b == 'true' ? '1' : (b == 'false' ? '0' : b);
-  if (isNumber(a) && isNumber(b)) {
-    if (op == 'pow') {
-      return Math.pow(a, b).toString();
-    } else {
-      var value = eval(a + op + '(' + b + ')'); // parens protect us from "5 - -12" being seen as "5--12" which is "(5--)12"
-      if (op == '/' && type in Runtime.INT_TYPES) value = value|0; // avoid emitting floats
-      return value.toString();
+
+  var aNumber = null, bNumber = null;
+  if (typeof a === 'number') {
+    aNumber = a;
+    a = a.toString();
+  } else if (isNumber(a)) aNumber = parseFloat(a);
+  if (typeof b === 'number') {
+    bNumber = b;
+    b = b.toString();
+  } else if (isNumber(b)) bNumber = parseFloat(b);
+
+  if (aNumber !== null && bNumber !== null) {
+    switch (op) {
+      case '+': return (aNumber + bNumber).toString();
+      case '-': return (aNumber - bNumber).toString();
+      case '*': return (aNumber * bNumber).toString();
+      case '/': {
+        if (type in Runtime.INT_TYPES) {
+          return ((aNumber / bNumber)|0).toString();
+        } else {
+          return (aNumber / bNumber).toString();
+        }
+      }
+      case '%': return (aNumber % bNumber).toString();
+      case '|': return (aNumber | bNumber).toString();
+      case '>>>': return (aNumber >>> bNumber).toString();
+      case '&': return (aNumber & bNumber).toString();
+      case 'pow': return Math.pow(aNumber, bNumber).toString();
+      default: throw 'need to implement getFastValue pn ' + op;
     }
   }
   if (op == 'pow') {
@@ -1492,21 +1513,26 @@ function getFastValue(a, op, b, type) {
     }
     return 'Math.pow(' + a + ', ' + b + ')';
   }
-  if (op in PLUS_MUL && isNumber(a)) { // if one of them is a number, keep it last
+  if (op in PLUS_MUL && aNumber !== null) { // if one of them is a number, keep it last
     var c = b;
     b = a;
     a = c;
+    var cNumber = bNumber;
+    bNumber = aNumber;
+    aNumber = cNumber;
   }
   if (op in MUL_DIV) {
     if (op == '*') {
-      if (a == 0 || b == 0) {
+      // We can't eliminate where a or b are 0 as that would break things for creating
+      // a negative 0.
+      if ((aNumber == 0 || bNumber == 0) && !(type in Runtime.FLOAT_TYPES)) {
         return '0';
-      } else if (a == 1) {
+      } else if (aNumber == 1) {
         return b;
-      } else if (b == 1) {
+      } else if (bNumber == 1) {
         return a;
-      } else if (isNumber(b) && type && isIntImplemented(type) && Runtime.getNativeTypeSize(type) <= 32) {
-        var shifts = Math.log(parseFloat(b))/Math.LN2;
+      } else if (bNumber !== null && type && isIntImplemented(type) && Runtime.getNativeTypeSize(type) <= 32) {
+        var shifts = Math.log(bNumber)/Math.LN2;
         if (shifts % 1 == 0) {
           return '(' + a + '<<' + shifts + ')';
         }
@@ -1515,13 +1541,13 @@ function getFastValue(a, op, b, type) {
         // if guaranteed small enough to not overflow into a double, do a normal multiply
         var bits = getBits(type) || 32; // default is 32-bit multiply for things like getelementptr indexes
         // Note that we can emit simple multiple in non-asm.js mode, but asm.js will not parse "16-bit" multiple, so must do imul there
-        if ((isNumber(a) && Math.abs(a) < TWO_TWENTY) || (isNumber(b) && Math.abs(b) < TWO_TWENTY) || (bits < 32 && !ASM_JS)) {
+        if ((aNumber !== null && Math.abs(a) < TWO_TWENTY) || (bNumber !== null && Math.abs(b) < TWO_TWENTY) || (bits < 32 && !ASM_JS)) {
           return '(((' + a + ')*(' + b + '))&' + ((Math.pow(2, bits)-1)|0) + ')'; // keep a non-eliminatable coercion directly on this
         }
         return '(Math.imul(' + a + ',' + b + ')|0)';
       }
-    } else {
-      if (a == '0') {
+    } else { // div
+      if (a == '0' && !(type in Runtime.FLOAT_TYPES)) { // careful on floats, since 0*NaN is not 0
         return '0';
       } else if (b == 1) {
         return a;
@@ -1758,7 +1784,7 @@ function checkBitcast(item) {
       } else {
         warnOnce('Casting a function pointer type to a potentially incompatible one (use -s VERBOSE=1 to see more)');
       }
-      warnOnce('See https://github.com/kripken/emscripten/wiki/CodeGuidlinesAndLimitations#function-pointer-issues for more information on dangerous function pointer casts');
+      warnOnce('See https://github.com/kripken/emscripten/wiki/CodeGuidelinesAndLimitations#function-pointer-issues for more information on dangerous function pointer casts');
       if (ASM_JS) warnOnce('Incompatible function pointer casts are very dangerous with ASM_JS=1, you should investigate and correct these');
     }
     if (oldCount != newCount && oldCount && newCount) showWarning();

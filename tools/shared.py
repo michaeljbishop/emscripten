@@ -304,7 +304,7 @@ def find_temp_directory():
 # we re-check sanity when the settings are changed)
 # We also re-check sanity and clear the cache when the version changes
 
-EMSCRIPTEN_VERSION = '1.5.9'
+EMSCRIPTEN_VERSION = '1.6.3'
 
 def generate_sanity():
   return EMSCRIPTEN_VERSION + '|' + get_llvm_target() + '|' + LLVM_ROOT
@@ -1413,6 +1413,9 @@ class Building:
       emcc_debug = os.environ.get('EMCC_DEBUG')
       if emcc_debug: del os.environ['EMCC_DEBUG']
 
+      emcc_leave_inputs_raw = os.environ.get('EMCC_LEAVE_INPUTS_RAW')
+      if emcc_leave_inputs_raw: del os.environ['EMCC_LEAVE_INPUTS_RAW']
+
       def make(opt_level):
         raw = relooper + '.raw.js'
         Building.emcc(os.path.join('relooper', 'Relooper.cpp'), ['-I' + os.path.join('relooper'), '--post-js',
@@ -1442,8 +1445,10 @@ class Building:
     finally:
       os.chdir(curr)
       if emcc_debug: os.environ['EMCC_DEBUG'] = emcc_debug
+      if emcc_leave_inputs_raw: os.environ['EMCC_LEAVE_INPUTS_RAW'] = emcc_leave_inputs_raw
       if not ok:
         logging.error('bootstrapping relooper failed. You may need to manually create relooper.js by compiling it, see src/relooper/emscripten')
+        try_delete(relooper) # do not leave a phase-1 version if phase 2 broke
         1/0
 
   @staticmethod

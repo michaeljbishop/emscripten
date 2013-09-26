@@ -39,7 +39,7 @@ def scan(ll, settings):
   if len(blockaddrs) > 0:
     settings['NECESSARY_BLOCKADDRS'] = blockaddrs
 
-NUM_CHUNKS_PER_CORE = 1.25
+NUM_CHUNKS_PER_CORE = 1.0
 MIN_CHUNK_SIZE = 1024*1024
 MAX_CHUNK_SIZE = float(os.environ.get('EMSCRIPT_MAX_CHUNK_SIZE') or 'inf') # configuring this is just for debugging purposes
 
@@ -58,6 +58,8 @@ def process_funcs((i, funcs, meta, settings_file, compiler, forwarded_file, libr
     f.write('\n')
     f.write(meta)
     f.close()
+    #print >> sys.stderr, 'running', str([settings_file, funcs_file, 'funcs', forwarded_file] + libraries).replace("'/", "'") # can use this in src/compiler_funcs.html arguments,
+    #                                                                                                                         # just copy temp dir to under this one
     out = jsrun.run_js(
       compiler,
       engine=compiler_engine,
@@ -68,8 +70,6 @@ def process_funcs((i, funcs, meta, settings_file, compiler, forwarded_file, libr
   except KeyboardInterrupt:
     # Python 2.7 seems to lock up when a child process throws KeyboardInterrupt
     raise Exception()
-  finally:
-    tempfiles.try_delete(funcs_file)
   if DEBUG: print >> sys.stderr, '.'
   return out
 
@@ -209,7 +209,7 @@ def emscript(infile, settings, outfile, libraries=[], compiler_engine=None,
   if cores > 1:
     intended_num_chunks = int(round(cores * NUM_CHUNKS_PER_CORE))
     chunk_size = max(MIN_CHUNK_SIZE, total_ll_size / intended_num_chunks)
-    chunk_size += 3*len(meta) + len(forwarded_data)/3 # keep ratio of lots of function code to meta (expensive to process, and done in each parallel task) and forwarded data (less expensive but potentially significant)
+    chunk_size += 3*len(meta) # keep ratio of lots of function code to meta (expensive to process, and done in each parallel task)
     chunk_size = min(MAX_CHUNK_SIZE, chunk_size)
   else:
     chunk_size = MAX_CHUNK_SIZE # if 1 core, just use the max chunk size
@@ -222,6 +222,8 @@ def emscript(infile, settings, outfile, libraries=[], compiler_engine=None,
   chunks = cache_module.chunkify(
     funcs, chunk_size,
     jcache.get_cachename('emscript_files') if jcache else None)
+
+  #chunks = [chunks[0]] # pick specific chunks for debugging/profiling
 
   funcs = None
 
@@ -251,7 +253,8 @@ def emscript(infile, settings, outfile, libraries=[], compiler_engine=None,
     if DEBUG: print >> sys.stderr, '  emscript: phase 2 working on %d chunks %s (intended chunk size: %.2f MB, meta: %.2f MB, forwarded: %.2f MB, total: %.2f MB)' % (len(chunks), ('using %d cores' % cores) if len(chunks) > 1 else '', chunk_size/(1024*1024.), len(meta)/(1024*1024.), len(forwarded_data)/(1024*1024.), total_ll_size/(1024*1024.))
 
     commands = [
-      (i, chunk, meta, settings_file, compiler, forwarded_file, libraries, compiler_engine, temp_files, DEBUG)
+      (i, chunk, meta, settings_file, compiler, forwarded_file, libraries, compiler_engine,# + ['--prof'],
+       temp_files, DEBUG)
       for i, chunk in enumerate(chunks)
     ]
 
