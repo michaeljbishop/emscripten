@@ -397,7 +397,13 @@ var LibrarySDL = {
       SDL.surfaces[surf] = null;
     },
 
-    lastTouch: {},
+    // the browser sends out touchstart events with the whole group of touches
+    // even if we received a previous touchstart for a specific touch identifier.
+    // You can test this by pressing one finger to the screen, then another. You'll
+    // receive two touchstart events, the first with a touches count of 1 the second
+    // with a touches count of two.
+    // SDL sends out a new touchstart event for only each newly started touch so to
+    // emulate this, we keep track of previously started touches.
     downFingers: {},
     savedKeydown: null,
 
@@ -408,9 +414,7 @@ var LibrarySDL = {
 
           var touches = [];
           
-          // First clear out any duplicate touchstart events
-          // XXX - michaeljbishop -  This is a bug workaround for Firefox OS. They
-          // sometimes send two touchstart events before a touchend/move for the same id.
+          // Clear out any touchstart events that we've already processed
           if (event.type === 'touchstart') {
             for(var i = 0; i < event.touches.length; i++) {
               var touch = event.touches[i];
@@ -426,8 +430,6 @@ var LibrarySDL = {
           var firstTouch = touches[0];
           if ( event.type == 'touchstart' ) {
             SDL.DOMButtons[0] = 1;
-            SDL.lastTouch.x = firstTouch.pageX;
-            SDL.lastTouch.y = firstTouch.pageY;
           };
           var mouseEventType;
           switch(event.type) {
@@ -437,8 +439,8 @@ var LibrarySDL = {
           var mouseEvent = {
             type: mouseEventType,
             button: 0,
-            pageX: firstTouch.pageX,
-            pageY: firstTouch.pageY
+            pageX: firstTouch.clientX,
+            pageY: firstTouch.clientY
           };
           SDL.events.push(mouseEvent);
 
@@ -456,8 +458,6 @@ var LibrarySDL = {
           
           // Remove the entry in the SDL.downFingers hash
           // because the finger is no longer down.
-          // XXX - michaeljbishop -  This is a bug workaround for Firefox OS. They
-          // sometimes send two touchstart events before a touchend/move for the same id.
           for(var i = 0; i < event.changedTouches.length; i++) {
             var touch = event.changedTouches[i];
             if (SDL.downFingers[touch.identifier] === true) {
@@ -468,8 +468,8 @@ var LibrarySDL = {
           var mouseEvent = {
             type: 'mouseup',
             button: 0,
-            pageX: SDL.lastTouch.x,
-            pageY: SDL.lastTouch.y
+            pageX: event.changedTouches[0].clientX,
+            pageY: event.changedTouches[0].clientY
           };
           SDL.DOMButtons[0] = 0;
           SDL.events.push(mouseEvent);
@@ -1593,16 +1593,16 @@ var LibrarySDL = {
 
   SDL_OpenAudio: function(desired, obtained) {
     try {
-      SDL.audio = {
-        freq: {{{ makeGetValue('desired', 'SDL.structs.AudioSpec.freq', 'i32', 0, 1) }}},
-        format: {{{ makeGetValue('desired', 'SDL.structs.AudioSpec.format', 'i16', 0, 1) }}},
-        channels: {{{ makeGetValue('desired', 'SDL.structs.AudioSpec.channels', 'i8', 0, 1) }}},
+    SDL.audio = {
+      freq: {{{ makeGetValue('desired', 'SDL.structs.AudioSpec.freq', 'i32', 0, 1) }}},
+      format: {{{ makeGetValue('desired', 'SDL.structs.AudioSpec.format', 'i16', 0, 1) }}},
+      channels: {{{ makeGetValue('desired', 'SDL.structs.AudioSpec.channels', 'i8', 0, 1) }}},
         samples: {{{ makeGetValue('desired', 'SDL.structs.AudioSpec.samples', 'i16', 0, 1) }}}, // Samples in the CB buffer per single sound channel.
-        callback: {{{ makeGetValue('desired', 'SDL.structs.AudioSpec.callback', 'void*', 0, 1) }}},
-        userdata: {{{ makeGetValue('desired', 'SDL.structs.AudioSpec.userdata', 'void*', 0, 1) }}},
-        paused: true,
-        timer: null
-      };
+      callback: {{{ makeGetValue('desired', 'SDL.structs.AudioSpec.callback', 'void*', 0, 1) }}},
+      userdata: {{{ makeGetValue('desired', 'SDL.structs.AudioSpec.userdata', 'void*', 0, 1) }}},
+      paused: true,
+      timer: null
+    };
       // The .silence field tells the constant sample value that corresponds to the safe un-skewed silence value for the wave data.
       if (SDL.audio.format == 0x0008 /*AUDIO_U8*/) {
         SDL.audio.silence = 128; // Audio ranges in [0, 255], so silence is half-way in between.
@@ -1610,7 +1610,7 @@ var LibrarySDL = {
         SDL.audio.silence = 0; // Signed data in range [-32768, 32767], silence is 0.
       } else {
         throw 'Invalid SDL audio format ' + SDL.audio.format + '!';
-      }
+    }
       // Round the desired audio frequency up to the next 'common' frequency value.
       // Web Audio API spec states 'An implementation must support sample-rates in at least the range 22050 to 96000.'
       if (SDL.audio.freq <= 0) {
@@ -1640,40 +1640,40 @@ var LibrarySDL = {
       } else if ((SDL.audio.samples & (SDL.audio.samples-1)) != 0) {
         throw 'Audio callback buffer size ' + SDL.audio.samples + ' must be a power-of-two!';
       }
-      
-      var totalSamples = SDL.audio.samples*SDL.audio.channels;
+
+    var totalSamples = SDL.audio.samples*SDL.audio.channels;
       SDL.audio.bytesPerSample = (SDL.audio.format == 0x0008 /*AUDIO_U8*/ || SDL.audio.format == 0x8008 /*AUDIO_S8*/) ? 1 : 2;
       SDL.audio.bufferSize = totalSamples*SDL.audio.bytesPerSample;
-      SDL.audio.buffer = _malloc(SDL.audio.bufferSize);
+    SDL.audio.buffer = _malloc(SDL.audio.bufferSize);
       
       // Create a callback function that will be routinely called to ask more audio data from the user application.
-      SDL.audio.caller = function() {
+    SDL.audio.caller = function() {
         if (!SDL.audio) {
           return;
         }
-        Runtime.dynCall('viii', SDL.audio.callback, [SDL.audio.userdata, SDL.audio.buffer, SDL.audio.bufferSize]);
-        SDL.audio.pushAudio(SDL.audio.buffer, SDL.audio.bufferSize);
-      };
+      Runtime.dynCall('viii', SDL.audio.callback, [SDL.audio.userdata, SDL.audio.buffer, SDL.audio.bufferSize]);
+      SDL.audio.pushAudio(SDL.audio.buffer, SDL.audio.bufferSize);
+    };
       
       SDL.audio.audioOutput = new Audio();
       // As a workaround use Mozilla Audio Data API on Firefox until it ships with Web Audio and sound quality issues are fixed.
       if (typeof(SDL.audio.audioOutput['mozSetup'])==='function') {
         SDL.audio.audioOutput['mozSetup'](SDL.audio.channels, SDL.audio.freq); // use string attributes on mozOutput for closure compiler
-        SDL.audio.mozBuffer = new Float32Array(totalSamples);
+      SDL.audio.mozBuffer = new Float32Array(totalSamples);
         SDL.audio.nextPlayTime = 0;
-        SDL.audio.pushAudio = function(ptr, size) {
-          var mozBuffer = SDL.audio.mozBuffer;
+      SDL.audio.pushAudio = function(ptr, size) {
+        var mozBuffer = SDL.audio.mozBuffer;
           // The input audio data for SDL audio is either 8-bit or 16-bit interleaved across channels, output for Mozilla Audio Data API
           // needs to be Float32 interleaved, so perform a sample conversion.
           if (SDL.audio.format == 0x8010 /*AUDIO_S16LSB*/) {
-            for (var i = 0; i < totalSamples; i++) {
+        for (var i = 0; i < totalSamples; i++) {
               mozBuffer[i] = ({{{ makeGetValue('ptr', 'i*2', 'i16', 0, 0) }}}) / 0x8000;
-            }
+        }
           } else if (SDL.audio.format == 0x0008 /*AUDIO_U8*/) {
             for (var i = 0; i < totalSamples; i++) {
               var v = ({{{ makeGetValue('ptr', 'i', 'i8', 0, 0) }}});
               mozBuffer[i] = ((v >= 0) ? v-128 : v+128) /128;
-            }
+      }
           }
           // Submit the audio data to audio device.
           SDL.audio.audioOutput['mozWriteAudio'](mozBuffer);
@@ -1772,7 +1772,7 @@ var LibrarySDL = {
               ++SDL.audio.numAudioTimersPending;
               Browser.safeSetTimeout(SDL.audio.caller, 1.0);
             }
-          } catch(e) {
+    } catch(e) {
             console.log('Web Audio API error playing back audio: ' + e.toString());
           }
         }
@@ -1802,7 +1802,7 @@ var LibrarySDL = {
         {{{ makeSetValue('obtained', 'SDL.structs.AudioSpec.samples', 0, 'i16') }}};
         {{{ makeSetValue('obtained', 'SDL.structs.AudioSpec.callback', 0, '*') }}};
         {{{ makeSetValue('obtained', 'SDL.structs.AudioSpec.userdata', 0, '*') }}};
-      }
+    }
     }
     if (!SDL.audio) {
       return -1;
