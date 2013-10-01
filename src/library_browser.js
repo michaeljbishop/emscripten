@@ -459,8 +459,9 @@ mergeInto(LibraryManager.library, {
 
         if (event.type === 'touchstart' || event.type === 'touchend' || event.type === 'touchmove') {
           var touch = event.touch;
-          if ( touch === undefined )
+          if (touch === undefined) {
             return; // the "touch" property is only defined in SDL
+          }
           var adjustedX = touch.pageX - (window.scrollX + rect.left);
           var adjustedY = touch.pageY - (window.scrollY + rect.top);
 
@@ -474,7 +475,7 @@ mergeInto(LibraryManager.library, {
             Browser.touches[touch.identifier] = coords;
           } else if (event.type === 'touchend' || event.type === 'touchmove') {
             Browser.lastTouches[touch.identifier] = Browser.touches[touch.identifier];
-            Browser.touches[touch.identifier] = {x: adjustedX, y: adjustedY};
+            Browser.touches[touch.identifier] = { x: adjustedX, y: adjustedY };
           } 
           return;
         }
