@@ -1788,7 +1788,7 @@ f6: nan
 
           int xx, yy, zz;
           char s[32];
-          int cc = sscanf("abc_10.b1_xyz_543_defg", "abc_%d.%2x_xyz_%3d_%3s", &xx, &yy, &zz, s);
+          int cc = sscanf("abc_10.b1_xyz9_543_defg", "abc_%d.%2x_xyz9_%3d_%3s", &xx, &yy, &zz, s);
           printf("%d:%d,%d,%d,%s\\n", cc, xx, yy, zz, s);
 
           printf("%d\\n", argc);
@@ -7742,12 +7742,18 @@ def process(filename):
     finally:
       Settings.INCLUDE_FULL_LIBRARY = 0
 
+  def test_fs_nodefs_rw(self):
+    src = open(path_from_root('tests', 'fs', 'test_nodefs_rw.c'), 'r').read()
+    self.do_run(src, 'success', force_c=True, js_engines=[NODE_JS])
+
   def test_unistd_access(self):
     if Settings.ASM_JS: Settings.ASM_JS = 2 # skip validation, asm does not support random code
     if not self.is_le32(): return self.skip('le32 needed for inline js')
-    src = open(path_from_root('tests', 'unistd', 'access.c'), 'r').read()
-    expected = open(path_from_root('tests', 'unistd', 'access.out'), 'r').read()
-    self.do_run(src, expected)
+    for fs in ['MEMFS', 'NODEFS']:
+      src = open(path_from_root('tests', 'unistd', 'access.c'), 'r').read()
+      expected = open(path_from_root('tests', 'unistd', 'access.out'), 'r').read()
+      Building.COMPILER_TEST_OPTS += ['-D' + fs]
+      self.do_run(src, expected, js_engines=[NODE_JS])
 
   def test_unistd_curdir(self):
     if Settings.ASM_JS: Settings.ASM_JS = 2 # skip validation, asm does not support random code
@@ -7783,9 +7789,11 @@ def process(filename):
   def test_unistd_truncate(self):
     if Settings.ASM_JS: Settings.ASM_JS = 2 # skip validation, asm does not support random code
     if not self.is_le32(): return self.skip('le32 needed for inline js')
-    src = open(path_from_root('tests', 'unistd', 'truncate.c'), 'r').read()
-    expected = open(path_from_root('tests', 'unistd', 'truncate.out'), 'r').read()
-    self.do_run(src, expected)
+    for fs in ['MEMFS', 'NODEFS']:
+      src = open(path_from_root('tests', 'unistd', 'truncate.c'), 'r').read()
+      expected = open(path_from_root('tests', 'unistd', 'truncate.out'), 'r').read()
+      Building.COMPILER_TEST_OPTS += ['-D' + fs]
+      self.do_run(src, expected, js_engines=[NODE_JS])
 
   def test_unistd_swab(self):
     src = open(path_from_root('tests', 'unistd', 'swab.c'), 'r').read()
@@ -7807,15 +7815,19 @@ def process(filename):
     self.do_run(src, expected)
 
   def test_unistd_unlink(self):
-    src = open(path_from_root('tests', 'unistd', 'unlink.c'), 'r').read()
-    self.do_run(src, 'success', force_c=True)
+    for fs in ['MEMFS', 'NODEFS']:
+      src = open(path_from_root('tests', 'unistd', 'unlink.c'), 'r').read()
+      Building.COMPILER_TEST_OPTS += ['-D' + fs]
+      self.do_run(src, 'success', force_c=True, js_engines=[NODE_JS])
 
   def test_unistd_links(self):
     if Settings.ASM_JS: Settings.ASM_JS = 2 # skip validation, asm does not support random code
     if not self.is_le32(): return self.skip('le32 needed for inline js')
-    src = open(path_from_root('tests', 'unistd', 'links.c'), 'r').read()
-    expected = open(path_from_root('tests', 'unistd', 'links.out'), 'r').read()
-    self.do_run(src, expected)
+    for fs in ['MEMFS', 'NODEFS']:
+      src = open(path_from_root('tests', 'unistd', 'links.c'), 'r').read()
+      expected = open(path_from_root('tests', 'unistd', 'links.out'), 'r').read()
+      Building.COMPILER_TEST_OPTS += ['-D' + fs]
+      self.do_run(src, expected, js_engines=[NODE_JS])
 
   def test_unistd_sleep(self):
     src = open(path_from_root('tests', 'unistd', 'sleep.c'), 'r').read()
@@ -7826,14 +7838,18 @@ def process(filename):
     if Settings.ASM_JS: Settings.ASM_JS = 2 # skip validation, asm does not support random code
     if not self.is_le32(): return self.skip('le32 needed for inline js')
     if self.run_name == 'o2': return self.skip('non-asm optimized builds can fail with inline js')
-    src = open(path_from_root('tests', 'unistd', 'io.c'), 'r').read()
-    expected = open(path_from_root('tests', 'unistd', 'io.out'), 'r').read()
-    self.do_run(src, expected)
+    for fs in ['MEMFS', 'NODEFS']:
+      src = open(path_from_root('tests', 'unistd', 'io.c'), 'r').read()
+      expected = open(path_from_root('tests', 'unistd', 'io.out'), 'r').read()
+      Building.COMPILER_TEST_OPTS += ['-D' + fs]
+      self.do_run(src, expected, js_engines=[NODE_JS])
 
   def test_unistd_misc(self):
-    src = open(path_from_root('tests', 'unistd', 'misc.c'), 'r').read()
-    expected = open(path_from_root('tests', 'unistd', 'misc.out'), 'r').read()
-    self.do_run(src, expected)
+    for fs in ['MEMFS', 'NODEFS']:
+      src = open(path_from_root('tests', 'unistd', 'misc.c'), 'r').read()
+      expected = open(path_from_root('tests', 'unistd', 'misc.out'), 'r').read()
+      Building.COMPILER_TEST_OPTS += ['-D' + fs]
+      self.do_run(src, expected, js_engines=[NODE_JS])
 
   def test_uname(self):
     src = r'''

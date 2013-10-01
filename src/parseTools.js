@@ -5,11 +5,12 @@
 
 // Does simple 'macro' substitution, using Django-like syntax,
 // {{{ code }}} will be replaced with |eval(code)|.
+// NOTE: Be careful with that ret check. If ret is |0|, |ret ? ret.toString() : ''| would result in ''!
 function processMacros(text) {
   return text.replace(/{{{([^}]|}(?!}))+}}}/g, function(str) {
     str = str.substr(3, str.length-6);
     var ret = eval(str);
-    return ret ? ret.toString() : '';
+    return ret !== null ? ret.toString() : '';
   });
 }
 
@@ -110,12 +111,22 @@ function isNiceIdent(ident, loose) {
 }
 
 function isJSVar(ident) {
-  return /^\(?[$_]?[\w$_\d ]*\)+$/.test(ident);
-
+  if (ident[0] === '(') {
+    if (ident[ident.length-1] !== ')') return false;
+    ident = ident.substr(1, ident.length-2);
+  }
+  return /^[$_]?[\w$_\d]* *$/.test(ident);
 }
 
 function isLocalVar(ident) {
-  return ident[0] == '$';
+  return ident[0] === '$';
+}
+
+// Simple variables or numbers, or things already quoted, do not need to be quoted
+function needsQuoting(ident) {
+  if (/^[-+]?[$_]?[\w$_\d]*$/.test(ident)) return false; // number or variable
+  if (ident[0] === '(' && ident[ident.length-1] === ')' && ident.indexOf('(', 1) < 0) return false; // already fully quoted
+  return true;
 }
 
 function isStructPointerType(type) {
@@ -932,12 +943,12 @@ function parseLLVMString(str) {
   var ret = [];
   var i = 0;
   while (i < str.length) {
-    var chr = str[i];
-    if (chr != '\\') {
-      ret.push(chr.charCodeAt(0));
+    var chr = str.charCodeAt(i);
+    if (chr !== 92) { // 92 === '//'.charCodeAt(0)
+      ret.push(chr);
       i++;
     } else {
-      ret.push(eval('0x' + str[i+1]+str[i+2]));
+      ret.push(parseInt(str[i+1]+str[i+2], '16'));
       i += 3;
     }
   }
@@ -1348,6 +1359,7 @@ function makeSetValue(ptr, pos, value, type, noNeedFirst, ignore, align, noSafe,
 
   value = indexizeFunctions(value, type);
   var offset = calcFastOffset(ptr, pos, noNeedFirst);
+  if (phase === 'pre' && isNumber(offset)) offset += ' '; // avoid pure numeric strings, seem to be perf issues with overly-aggressive interning or slt in pre processing of heap inits
   if (SAFE_HEAP && !noSafe) {
     var printType = type;
     if (printType !== 'null' && printType[0] !== '#') printType = '"' + safeQuote(printType) + '"';
@@ -1464,18 +1476,14 @@ function makeHEAPView(which, start, end) {
   return 'HEAP' + which + '.subarray((' + start + ')' + mod + ',(' + end + ')' + mod + ')';
 }
 
-var PLUS_MUL = set('+', '*');
-var MUL_DIV = set('*', '/');
-var PLUS_MINUS = set('+', '-');
 var TWO_TWENTY = Math.pow(2, 20);
 
 // Given two values and an operation, returns the result of that operation.
 // Tries to do as much as possible at compile time.
 // Leaves overflows etc. unhandled, *except* for integer multiply, in order to be efficient with Math.imul
 function getFastValue(a, op, b, type) {
-  //return '(' + a + ')' + op + '(' + b + ')';
-  a = a == 'true' ? '1' : (a == 'false' ? '0' : a);
-  b = b == 'true' ? '1' : (b == 'false' ? '0' : b);
+  a = a === 'true' ? '1' : (a === 'false' ? '0' : a);
+  b = b === 'true' ? '1' : (b === 'false' ? '0' : b);
 
   var aNumber = null, bNumber = null;
   if (typeof a === 'number') {
@@ -1493,7 +1501,7 @@ function getFastValue(a, op, b, type) {
       case '-': return (aNumber - bNumber).toString();
       case '*': return (aNumber * bNumber).toString();
       case '/': {
-        if (type in Runtime.INT_TYPES) {
+        if (type[0] === 'i') {
           return ((aNumber / bNumber)|0).toString();
         } else {
           return (aNumber / bNumber).toString();
@@ -1507,13 +1515,13 @@ function getFastValue(a, op, b, type) {
       default: throw 'need to implement getFastValue pn ' + op;
     }
   }
-  if (op == 'pow') {
-    if (a == '2' && isIntImplemented(type)) {
+  if (op === 'pow') {
+    if (a === '2' && isIntImplemented(type)) {
       return '(1 << (' + b + '))';
     }
     return 'Math.pow(' + a + ', ' + b + ')';
   }
-  if (op in PLUS_MUL && aNumber !== null) { // if one of them is a number, keep it last
+  if ((op === '+' || op === '*') && aNumber !== null) { // if one of them is a number, keep it last
     var c = b;
     b = a;
     a = c;
@@ -1521,46 +1529,44 @@ function getFastValue(a, op, b, type) {
     bNumber = aNumber;
     aNumber = cNumber;
   }
-  if (op in MUL_DIV) {
-    if (op == '*') {
-      // We can't eliminate where a or b are 0 as that would break things for creating
-      // a negative 0.
-      if ((aNumber == 0 || bNumber == 0) && !(type in Runtime.FLOAT_TYPES)) {
-        return '0';
-      } else if (aNumber == 1) {
-        return b;
-      } else if (bNumber == 1) {
-        return a;
-      } else if (bNumber !== null && type && isIntImplemented(type) && Runtime.getNativeTypeSize(type) <= 32) {
-        var shifts = Math.log(bNumber)/Math.LN2;
-        if (shifts % 1 == 0) {
-          return '(' + a + '<<' + shifts + ')';
-        }
+  if (op === '*') {
+    // We can't eliminate where a or b are 0 as that would break things for creating
+    // a negative 0.
+    if ((aNumber === 0 || bNumber === 0) && !(type in Runtime.FLOAT_TYPES)) {
+      return '0';
+    } else if (aNumber === 1) {
+      return b;
+    } else if (bNumber === 1) {
+      return a;
+    } else if (bNumber !== null && type && isIntImplemented(type) && Runtime.getNativeTypeSize(type) <= 32) {
+      var shifts = Math.log(bNumber)/Math.LN2;
+      if (shifts % 1 === 0) {
+        return '(' + a + '<<' + shifts + ')';
       }
-      if (!(type in Runtime.FLOAT_TYPES)) {
-        // if guaranteed small enough to not overflow into a double, do a normal multiply
-        var bits = getBits(type) || 32; // default is 32-bit multiply for things like getelementptr indexes
-        // Note that we can emit simple multiple in non-asm.js mode, but asm.js will not parse "16-bit" multiple, so must do imul there
-        if ((aNumber !== null && Math.abs(a) < TWO_TWENTY) || (bNumber !== null && Math.abs(b) < TWO_TWENTY) || (bits < 32 && !ASM_JS)) {
-          return '(((' + a + ')*(' + b + '))&' + ((Math.pow(2, bits)-1)|0) + ')'; // keep a non-eliminatable coercion directly on this
-        }
-        return '(Math.imul(' + a + ',' + b + ')|0)';
-      }
-    } else { // div
-      if (a == '0' && !(type in Runtime.FLOAT_TYPES)) { // careful on floats, since 0*NaN is not 0
-        return '0';
-      } else if (b == 1) {
-        return a;
-      } // Doing shifts for division is problematic, as getting the rounding right on negatives is tricky
     }
-  } else if (op in PLUS_MINUS) {
-    if (b[0] == '-') {
-      op = op == '+' ? '-' : '+';
+    if (!(type in Runtime.FLOAT_TYPES)) {
+      // if guaranteed small enough to not overflow into a double, do a normal multiply
+      var bits = getBits(type) || 32; // default is 32-bit multiply for things like getelementptr indexes
+      // Note that we can emit simple multiple in non-asm.js mode, but asm.js will not parse "16-bit" multiple, so must do imul there
+      if ((aNumber !== null && Math.abs(a) < TWO_TWENTY) || (bNumber !== null && Math.abs(b) < TWO_TWENTY) || (bits < 32 && !ASM_JS)) {
+        return '(((' + a + ')*(' + b + '))&' + ((Math.pow(2, bits)-1)|0) + ')'; // keep a non-eliminatable coercion directly on this
+      }
+      return '(Math.imul(' + a + ',' + b + ')|0)';
+    }
+  } else if (op === '/') {
+    if (a === '0' && !(type in Runtime.FLOAT_TYPES)) { // careful on floats, since 0*NaN is not 0
+      return '0';
+    } else if (b === 1) {
+      return a;
+    } // Doing shifts for division is problematic, as getting the rounding right on negatives is tricky
+  } else if (op === '+' || op === '-') {
+    if (b[0] === '-') {
+      op = op === '+' ? '-' : '+';
       b = b.substr(1);
     }
-    if (a == 0) {
-      return op == '+' ? b : '(-' + b + ')';
-    } else if (b == 0) {
+    if (aNumber === 0) {
+      return op === '+' ? b : '(-' + b + ')';
+    } else if (bNumber === 0) {
       return a;
     }
   }
@@ -1589,12 +1595,8 @@ function getFastValues(list, op, type) {
 }
 
 function calcFastOffset(ptr, pos, noNeedFirst) {
-  var offset = noNeedFirst ? '0' : makeGetPos(ptr);
-  return getFastValue(offset, '+', pos, 'i32');
-}
-
-function makeGetPos(ptr) {
-  return ptr;
+  assert(!noNeedFirst);
+  return getFastValue(ptr, '+', pos, 'i32');
 }
 
 var IHEAP_FHEAP = set('IHEAP', 'IHEAPU', 'FHEAP');
@@ -1831,7 +1833,7 @@ function getGetElementPtrIndexes(item) {
   // struct, and possibly further substructures, all embedded
   // can also be to 'blocks': [8 x i32]*, not just structs
   type = removePointing(type);
-  var indexes = [makeGetPos(ident)];
+  var indexes = [ident];
   var offset = item.params[1];
   if (offset != 0) {
     if (isStructType(type)) {
@@ -1986,13 +1988,12 @@ function makeSignOp(value, type, op, force, ignore) {
   if (USE_TYPED_ARRAYS == 2 && type == 'i64') {
     return value; // these are always assumed to be two 32-bit unsigneds.
   }
-
   if (isPointerType(type)) type = 'i32'; // Pointers are treated as 32-bit ints
   if (!value) return value;
   var bits, full;
   if (type in Runtime.INT_TYPES) {
     bits = parseInt(type.substr(1));
-    full = op + 'Sign(' + value + ', ' + bits + ', ' + Math.floor(ignore || (correctSpecificSign())) + ')';
+    full = op + 'Sign(' + value + ', ' + bits + ', ' + Math.floor(ignore || correctSpecificSign()) + ')';
     // Always sign/unsign constants at compile time, regardless of CHECK/CORRECT
     if (isNumber(value)) {
       return eval(full).toString();
@@ -2000,23 +2001,25 @@ function makeSignOp(value, type, op, force, ignore) {
   }
   if ((ignore || !correctSigns()) && !CHECK_SIGNS && !force) return value;
   if (type in Runtime.INT_TYPES) {
+    // this is an integer, but not a number (or we would have already handled it)
     // shortcuts
     if (!CHECK_SIGNS || ignore) {
+      if (value === 'true') {
+        value = '1';
+      } else if (value === 'false') {
+        value = '0';
+      } else if (needsQuoting(value)) value = '(' + value + ')';
       if (bits === 32) {
         if (op === 're') {
-          return '(' + getFastValue(value, '|', '0') + ')';
+          return '(' + value + '|0)';
         } else {
-
-          return '(' + getFastValue(value, '>>>', '0') + ')';
-          // Alternatively, we can consider the lengthier
-          //    return makeInlineCalculation('VALUE >= 0 ? VALUE : ' + Math.pow(2, bits) + ' + VALUE', value, 'tempBigInt');
-          // which does not always turn us into a 32-bit *un*signed value
+          return '(' + value +  '>>>0)';
         }
       } else if (bits < 32) {
         if (op === 're') {
-          return makeInlineCalculation('(VALUE << ' + (32-bits) + ') >> ' + (32-bits), value, 'tempInt');
+          return '((' + value + '<<' + (32-bits) + ')>>' + (32-bits) + ')';
         } else {
-          return '(' + getFastValue(value, '&', Math.pow(2, bits)-1) + ')';
+          return '(' + value + '&' + (Math.pow(2, bits)-1) + ')';
         }
       } else { // bits > 32
         if (op === 're') {
@@ -2106,7 +2109,7 @@ function processMathop(item) {
     if (item.params[i]) {
       paramTypes[i] = item.params[i].type || type;
       idents[i] = finalizeLLVMParameter(item.params[i]);
-      if (!isNumber(idents[i]) && !isNiceIdent(idents[i])) {
+      if (needsQuoting(idents[i])) {
         idents[i] = '(' + idents[i] + ')'; // we may have nested expressions. So enforce the order of operations we want
       }
     } else {
@@ -2543,5 +2546,10 @@ function makePrintChars(s, sep) {
   }
   ret += '_putchar(10)';
   return ret;
+}
+
+function parseAlign(text) { // parse ", align \d+"
+  if (!text) return QUANTUM_SIZE;
+  return parseInt(text.substr(8));
 }
 

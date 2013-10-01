@@ -206,6 +206,11 @@ if (phase == 'pre') {
 
 if (VERBOSE) printErr('VERBOSE is on, this generates a lot of output and can slow down compilation');
 
+// Load struct and define information.
+var temp = JSON.parse(read(STRUCT_INFO));
+C_STRUCTS = temp.structs;
+C_DEFINES = temp.defines;
+
 // Load compiler code
 
 load('modules.js');
@@ -218,7 +223,7 @@ if (phase == 'funcs' && RELOOP) { // XXX handle !singlePhase
   try {
     load(RELOOPER);
   } catch(e) {
-    printErr('cannot find relooper at ' + RELOOPER + ', trying in current dir');
+    printErr('cannot load relooper at ' + RELOOPER + ' : ' + e + ', trying in current dir');
     load('relooper.js');
   }
   assert(typeof Relooper != 'undefined');
@@ -273,6 +278,9 @@ function compile(raw) {
     var analyzed = analyzer(intertyped);
     intertyped = null;
     JSify(analyzed);
+
+    //dumpInterProf();
+    //printErr(phase + ' paths (fast, slow): ' + [fastPaths, slowPaths]);
 
     phase = null;
 
