@@ -614,14 +614,15 @@ mergeInto(LibraryManager.library, {
         // changed its name)
         FS.hashAddNode(old_node);
       }
-      if (FS.trackingDelegate) {
-        if (FS.trackingDelegate['didDeleteFile'])
-          FS.trackingDelegate['didDeleteFile'](old_path);
-        if (FS.trackingDelegate['didOpenFile'])
-          FS.trackingDelegate['didOpenFile'](new_path, FS.tracking.openFlags.WRITE);
-        if (FS.trackingDelegate['didCloseFile'])
-          FS.trackingDelegate['didCloseFile'](new_path);
-      }
+
+      if (FS.trackingDelegate['didDeleteFile'])
+        FS.trackingDelegate['didDeleteFile'](old_path);
+      if (FS.trackingDelegate['didOpenFile'])
+        FS.trackingDelegate['didOpenFile'](new_path, FS.tracking.openFlags.WRITE);
+      if (FS.trackingDelegate['didWriteToFile'])
+        FS.trackingDelegate['didWriteToFile'](new_path);
+      if (FS.trackingDelegate['didCloseFile'])
+        FS.trackingDelegate['didCloseFile'](new_path);
     },
     rmdir: function(path) {
       var lookup = FS.lookupPath(path, { parent: true });
