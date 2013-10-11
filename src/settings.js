@@ -170,6 +170,12 @@ var ALIASING_FUNCTION_POINTERS = 0; // Whether to allow function pointers to ali
                                     // a different type. This can greatly decrease table sizes
                                     // in asm.js, but can break code that compares function
                                     // pointers across different types.
+var FUNCTION_POINTER_ALIGNMENT = 2; // Byte alignment of function pointers - we will fill the
+                                    // tables with zeros on aligned values. 1 means all values
+                                    // are aligned and all will be used (which is optimal).
+                                    // Sadly 1 breaks on &Class::method function pointer calls,
+                                    // which llvm assumes have the lower bit zero (see
+                                    // test_polymorph and issue #1692).
 
 var ASM_HEAP_LOG = 0; // Simple heap logging, like SAFE_HEAP_LOG but cheaper, and in asm.js
 
@@ -266,6 +272,8 @@ var CORRECT_ROUNDINGS = 1; // C rounds to 0 (-5.5 to -5, +5.5 to 5), while JS ha
 var FS_LOG = 0; // Log all FS operations.  This is especially helpful when you're porting
                 // a new project and want to see a list of file system operations happening
                 // so that you can create a virtual file system with all of the required files.
+var CASE_INSENSITIVE_FS = 0; // If set to nonzero, the provided virtual filesystem if treated case-insensitive, like
+                             // Windows and OSX do. If set to 0, the VFS is case-sensitive, like on Linux.
 
 var USE_BSS = 1; // https://en.wikipedia.org/wiki/.bss
                  // When enabled, 0-initialized globals are sorted to the end of the globals list,
@@ -419,14 +427,15 @@ var EXPLICIT_ZEXT = 0; // If 1, generate an explicit conversion of zext i1 to i3
 
 var NECESSARY_BLOCKADDRS = []; // List of (function, block) for all block addresses that are taken.
 
-var EMIT_GENERATED_FUNCTIONS = 0; // whether to emit the list of generated functions, needed for external JS optimization passes
-
 var JS_CHUNK_SIZE = 10240; // Used as a maximum size before breaking up expressions and lines into smaller pieces
 
 var EXPORT_NAME = 'Module'; // Global variable to export the module as for environments without a standardized module
                             // loading system (e.g. the browser and SM shell).
 
+var RUNNING_JS_OPTS = 0; // whether js opts will be run, after the main compiler
+
 var COMPILER_ASSERTIONS = 0; // costly (slow) compile-time assertions
+var COMPILER_FASTPATHS = 1; // use fast-paths to speed up compilation
 
 // Compiler debugging options
 var DEBUG_TAGS_SHOWING = [];

@@ -762,6 +762,7 @@ mergeInto(LibraryManager.library, {
         if (e instanceof ExitStatus) {
           return;
         } else {
+          if (e && typeof e === 'object' && e.stack) Module.printErr('exception thrown: ' + [e, e.stack]);
           throw e;
         }
       }

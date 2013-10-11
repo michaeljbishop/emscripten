@@ -783,13 +783,14 @@ function analyzer(data, sidePass) {
                   assert(PRECISE_I64_MATH, 'Must have precise i64 math for non-constant 64-bit shifts');
                   Types.preciseI64MathUsed = 1;
                   value.intertype = 'value';
-                  value.ident = 'var ' + value.assignTo + '$0 = ' +
+                  value.ident = makeVarDef(value.assignTo) + '$0=' +
                       asmCoercion('_bitshift64' + value.op[0].toUpperCase() + value.op.substr(1) + '(' + 
                         asmCoercion(sourceElements[0].ident, 'i32') + ',' +
                         asmCoercion(sourceElements[1].ident, 'i32') + ',' +
                         asmCoercion(value.params[1].ident + '$0', 'i32') + ')', 'i32'
                       ) + ';' +
-                      'var ' + value.assignTo + '$1 = tempRet0;';
+                      makeVarDef(value.assignTo) + '$1=tempRet0;';
+                  value.vars = [[value.assignTo + '$0', 'i32'], [value.assignTo + '$1', 'i32']];
                   value.assignTo = null;
                   i++;
                   continue;
@@ -801,27 +802,65 @@ function analyzer(data, sidePass) {
                 var whole = shifts >= 0 ? Math.floor(shifts/32) : Math.ceil(shifts/32);
                 var fraction = Math.abs(shifts % 32);
                 if (signed) {
-                  var signedFill = '(' + makeSignOp(sourceElements[sourceElements.length-1].ident, 'i' + sourceElements[sourceElements.length-1].bits, 're', 1, 1) + ' < 0 ? -1 : 0)';
-                  var signedKeepAlive = { intertype: 'value', ident: sourceElements[sourceElements.length-1].ident, type: 'i32' };
+                  var signedFill = {
+                    intertype: 'mathop',
+                    op: 'select',
+                    variant: 's',
+                    type: 'i32',
+                    params: [{
+                      intertype: 'mathop',
+                      op: 'icmp',
+                      variant: 'slt',
+                      type: 'i32',
+                      params: [
+                        { intertype: 'value', ident: sourceElements[sourceElements.length-1].ident, type: 'i' + Math.min(sourceBits, 32) },
+                        { intertype: 'value', ident: '0', type: 'i32' }
+                      ]
+                    },
+                      { intertype: 'value', ident: '-1', type: 'i32' },
+                      { intertype: 'value', ident: '0', type: 'i32' },
+                    ]
+                  };
                 }
                 for (var j = 0; j < targetElements.length; j++) {
-                  var result = {
-                    intertype: 'value',
-                    ident: (j + whole >= 0 && j + whole < sourceElements.length) ? sourceElements[j + whole].ident : (signed ? signedFill : '0'),
-                    params: [(signed && j + whole > sourceElements.length) ? signedKeepAlive : null],
-                    type: 'i32',
-                  };
-                  if (j == 0 && sourceBits < 32) {
-                    // zext sign correction
-                    result.ident = makeSignOp(result.ident, 'i' + sourceBits, isUnsignedOp(value.op) ? 'un' : 're', 1, 1);
+                  var inBounds = j + whole >= 0 && j + whole < sourceElements.length;
+                  var result;
+                  if (inBounds || !signed) {
+                    result = {
+                      intertype: 'value',
+                      ident: inBounds ? sourceElements[j + whole].ident : '0',
+                      type: 'i' + Math.min(sourceBits, 32),
+                    };
+                    if (j == 0 && sourceBits < 32) {
+                      // zext sign correction
+                      var result2 = {
+                        intertype: 'mathop',
+                        op: isUnsignedOp(value.op) ? 'zext' : 'sext',
+                        params: [result, {
+                          intertype: 'type',
+                          ident: 'i32',
+                          type: 'i' + sourceBits
+                        }],
+                        type: 'i32'
+                      };
+                      result = result2;
+                    }
+                  } else {
+                    // out of bounds and signed
+                    result = copy(signedFill);
                   }
                   if (fraction != 0) {
-                    var other = {
-                      intertype: 'value',
-                      ident: (j + sign + whole >= 0 && j + sign + whole < sourceElements.length) ? sourceElements[j + sign + whole].ident : (signed ? signedFill : '0'),
-                      params: [(signed && j + sign + whole > sourceElements.length) ? signedKeepAlive : null],
-                      type: 'i32',
-                    };
+                    var other;
+                    var otherInBounds = j + sign + whole >= 0 && j + sign + whole < sourceElements.length;
+                    if (otherInBounds || !signed) {
+                      other = {
+                        intertype: 'value',
+                        ident: otherInBounds ? sourceElements[j + sign + whole].ident : '0',
+                        type: 'i32',
+                      };
+                    } else {
+                      other = copy(signedFill);
+                    }
                     other = {
                       intertype: 'mathop',
                       op: shiftOp,
@@ -871,10 +910,17 @@ function analyzer(data, sidePass) {
                 }
                 if (targetBits <= 32) {
                   // We are generating a normal legal type here
-                  legalValue = {
-                    intertype: 'value',
-                    ident: targetElements[0].ident + (targetBits < 32 ? '&' + (Math.pow(2, targetBits)-1) : ''),
-                    type: 'rawJS'
+                  legalValue = { intertype: 'value', ident: targetElements[0].ident, type: 'i32' };
+                  if (targetBits < 32) {
+                    legalValue = {
+                      intertype: 'mathop',
+                      op: 'and',
+                      type: 'i32',
+                      params: [
+                        legalValue,
+                        { intertype: 'value', ident: (Math.pow(2, targetBits)-1).toString(), type: 'i32' }
+                      ]
+                    }
                   };
                   legalValue.assignTo = item.assignTo;
                   toAdd.push(legalValue);
@@ -1116,7 +1162,7 @@ function analyzer(data, sidePass) {
             rawLinesIndex: i
           };
           if (variable.origin === 'alloca') {
-            variable.allocatedNum = item.allocatedNum;
+            variable.allocatedNum = item.ident;
           }
           if (variable.origin === 'call') {
             variable.type = getReturnType(variable.type);
@@ -1607,9 +1653,9 @@ function analyzer(data, sidePass) {
       var lines = func.labels[0].lines;
       for (var i = 0; i < lines.length; i++) {
         var item = lines[i];
-        if (!item.assignTo || item.intertype != 'alloca' || !isNumber(item.allocatedNum)) break;
+        if (!item.assignTo || item.intertype != 'alloca' || !isNumber(item.ident)) break;
         item.allocatedSize = func.variables[item.assignTo].impl === VAR_EMULATED ?
-          calcAllocatedSize(item.allocatedType)*item.allocatedNum: 0;
+          calcAllocatedSize(item.allocatedType)*item.ident: 0;
         if (USE_TYPED_ARRAYS === 2) {
           // We need to keep the stack aligned
           item.allocatedSize = Runtime.forceAlign(item.allocatedSize, Runtime.STACK_ALIGN);
@@ -1618,7 +1664,7 @@ function analyzer(data, sidePass) {
       var index = 0;
       for (var i = 0; i < lines.length; i++) {
         var item = lines[i];
-        if (!item.assignTo || item.intertype != 'alloca' || !isNumber(item.allocatedNum)) break;
+        if (!item.assignTo || item.intertype != 'alloca' || !isNumber(item.ident)) break;
         item.allocatedIndex = index;
         index += item.allocatedSize;
         delete item.allocatedSize;
@@ -1646,7 +1692,7 @@ function analyzer(data, sidePass) {
 
         for (var i = 0; i < lines.length; i++) {
           var item = lines[i];
-          if (!finishedInitial && (!item.assignTo || item.intertype != 'alloca' || !isNumber(item.allocatedNum))) {
+          if (!finishedInitial && (!item.assignTo || item.intertype != 'alloca' || !isNumber(item.ident))) {
             finishedInitial = true;
           }
           if (item.intertype == 'alloca' && finishedInitial) {

@@ -49,15 +49,8 @@ if STDERR_FILE:
   logging.info('logging stderr in js compiler phase into %s' % STDERR_FILE)
   STDERR_FILE = open(STDERR_FILE, 'w')
 
-def process_funcs((i, funcs, meta, settings_file, compiler, forwarded_file, libraries, compiler_engine, temp_files, DEBUG)):
+def process_funcs((i, funcs_file, meta, settings_file, compiler, forwarded_file, libraries, compiler_engine, DEBUG)):
   try:
-    funcs_file = temp_files.get('.func_%d.ll' % i).name
-    f = open(funcs_file, 'w')
-    f.write(funcs)
-    funcs = None
-    f.write('\n')
-    f.write(meta)
-    f.close()
     #print >> sys.stderr, 'running', str([settings_file, funcs_file, 'funcs', forwarded_file] + libraries).replace("'/", "'") # can use this in src/compiler_funcs.html arguments,
     #                                                                                                                         # just copy temp dir to under this one
     out = jsrun.run_js(
@@ -100,42 +93,42 @@ def emscript(infile, settings, outfile, libraries=[], compiler_engine=None,
   ll = open(infile).read()
   scan(ll, settings)
   total_ll_size = len(ll)
-  ll = None # allow collection
   if DEBUG: logging.debug('  emscript: scan took %s seconds' % (time.time() - t))
 
   # Split input into the relevant parts for each phase
-  pre = []
-  funcs = [] # split up functions here, for parallelism later
-  meta = [] # needed by each function XXX
 
   if DEBUG: t = time.time()
-  in_func = False
-  ll_lines = open(infile).readlines()
-  curr_func = None
-  for line in ll_lines:
-    if in_func:
-      curr_func.append(line)
-      if line.startswith('}'):
-        in_func = False
-        funcs.append((curr_func[0], ''.join(curr_func))) # use the entire line as the identifier
-        # pre needs to know about all implemented functions, even for non-pre func
-        pre.append(curr_func[0])
-        pre.append(line)
-        curr_func = None
-    else:
-      if line.startswith(';'): continue
-      if line.startswith('define '):
-        in_func = True
-        curr_func = [line]
-      elif line.find(' = type { ') > 0:
-        pre.append(line) # type
-      elif line.startswith('!'):
-        if line.startswith('!llvm.module'): continue # we can ignore that
-        meta.append(line) # metadata
-      else:
-        pre.append(line) # pre needs it so we know about globals in pre and funcs. So emit globals there
-  ll_lines = None
-  meta = ''.join(meta)
+
+  pre = []
+  funcs = [] # split up functions here, for parallelism later
+
+  meta_start = ll.find('\n!')
+  if meta_start > 0:
+    meta = ll[meta_start:]
+  else:
+    meta = ''
+    meta_start = -1
+
+  start = ll.find('\n') if ll[0] == ';' else 0 # ignore first line, which contains ; ModuleID = '/dir name'
+
+  func_start = start
+  last = func_start
+  while 1:
+    last = func_start
+    func_start = ll.find('\ndefine ', func_start)
+    if func_start > last:
+      pre.append(ll[last:min(func_start+1, meta_start)] + '\n')
+    if func_start < 0:
+      pre.append(ll[last:meta_start] + '\n')
+      break
+    header = ll[func_start+1:ll.find('\n', func_start+1)+1]
+    end = ll.find('\n}', func_start)
+    last = end+3
+    funcs.append((header, ll[func_start+1:last]))
+    pre.append(header + '}\n')
+    func_start = last
+  ll = None
+
   if DEBUG and len(meta) > 1024*1024: logging.debug('emscript warning: large amounts of metadata, will slow things down')
   if DEBUG: logging.debug('  emscript: split took %s seconds' % (time.time() - t))
 
@@ -195,6 +188,7 @@ def emscript(infile, settings, outfile, libraries=[], compiler_engine=None,
       jcache.set(shortkey, keys, out)
   pre, forwarded_data = out.split('//FORWARDED_DATA:')
   forwarded_file = temp_files.get('.json').name
+  pre_input = None
   open(forwarded_file, 'w').write(forwarded_data)
   if DEBUG: logging.debug('  emscript: phase 1 took %s seconds' % (time.time() - t))
 
@@ -254,11 +248,20 @@ def emscript(infile, settings, outfile, libraries=[], compiler_engine=None,
 
     if DEBUG: logging.debug('  emscript: phase 2 working on %d chunks %s (intended chunk size: %.2f MB, meta: %.2f MB, forwarded: %.2f MB, total: %.2f MB)' % (len(chunks), ('using %d cores' % cores) if len(chunks) > 1 else '', chunk_size/(1024*1024.), len(meta)/(1024*1024.), len(forwarded_data)/(1024*1024.), total_ll_size/(1024*1024.)))
 
-    commands = [
-      (i, chunk, meta, settings_file, compiler, forwarded_file, libraries, compiler_engine,# + ['--prof'],
-       temp_files, DEBUG)
-      for i, chunk in enumerate(chunks)
-    ]
+    commands = []
+    for i in range(len(chunks)):
+      funcs_file = temp_files.get('.func_%d.ll' % i).name
+      f = open(funcs_file, 'w')
+      f.write(chunks[i])
+      if not jcache:
+        chunks[i] = None # leave chunks array alive (need its length later)
+      f.write('\n')
+      f.write(meta)
+      f.close()
+      commands.append(
+        (i, funcs_file, meta, settings_file, compiler, forwarded_file, libraries, compiler_engine,# + ['--prof'],
+         DEBUG)
+      )
 
     if len(chunks) > 1:
       pool = multiprocessing.Pool(processes=cores)
@@ -329,8 +332,9 @@ def emscript(infile, settings, outfile, libraries=[], compiler_engine=None,
 
   # calculations on merged forwarded data
   forwarded_json['Functions']['indexedFunctions'] = {}
-  i = 2 # universal counter
-  if settings['ASM_JS']: i += 2*settings['RESERVED_FUNCTION_POINTERS']
+  i = settings['FUNCTION_POINTER_ALIGNMENT'] # universal counter
+  if settings['ASM_JS']: i += settings['RESERVED_FUNCTION_POINTERS']*settings['FUNCTION_POINTER_ALIGNMENT']
+  base_fp = i
   table_counters = {} # table-specific counters
   alias = settings['ASM_JS'] and settings['ALIASING_FUNCTION_POINTERS']
   sig = None
@@ -339,13 +343,13 @@ def emscript(infile, settings, outfile, libraries=[], compiler_engine=None,
       sig = forwarded_json['Functions']['implementedFunctions'].get(indexed) or forwarded_json['Functions']['unimplementedFunctions'].get(indexed)
       assert sig, indexed
       if sig not in table_counters:
-        table_counters[sig] = 2 + 2*settings['RESERVED_FUNCTION_POINTERS']
+        table_counters[sig] = base_fp
       curr = table_counters[sig]
-      table_counters[sig] += 2
+      table_counters[sig] += settings['FUNCTION_POINTER_ALIGNMENT']
     else:
       curr = i
-      i += 2
-    #logging.debug('function indexing', indexed, curr, sig)
+      i += settings['FUNCTION_POINTER_ALIGNMENT']
+    #logging.debug('function indexing ' + str([indexed, curr, sig]))
     forwarded_json['Functions']['indexedFunctions'][indexed] = curr # make sure not to modify this python object later - we use it in indexize
 
   def split_32(x):
@@ -353,17 +357,18 @@ def emscript(infile, settings, outfile, libraries=[], compiler_engine=None,
     return '%d,%d,%d,%d' % (x&255, (x >> 8)&255, (x >> 16)&255, (x >> 24)&255)
 
   indexing = forwarded_json['Functions']['indexedFunctions']
+  def indexize_mem(js):
+    return re.sub(r"\"?'?{{ FI_([\w\d_$]+) }}'?\"?,0,0,0", lambda m: split_32(indexing.get(m.groups(0)[0]) or 0), js)
   def indexize(js):
-    # In the global initial allocation, we need to split up into Uint8 format
-    ret = re.sub(r"\"?'?{{ FI_([\w\d_$]+) }}'?\"?,0,0,0", lambda m: split_32(indexing.get(m.groups(0)[0]) or 0), js)
-    return re.sub(r"'{{ FI_([\w\d_$]+) }}'", lambda m: str(indexing.get(m.groups(0)[0]) or 0), ret)
+    return re.sub(r"'{{ FI_([\w\d_$]+) }}'", lambda m: str(indexing.get(m.groups(0)[0]) or 0), js)
 
   blockaddrs = forwarded_json['Functions']['blockAddresses']
+  def blockaddrsize_mem(js):
+    return re.sub(r'"?{{{ BA_([\w\d_$]+)\|([\w\d_$]+) }}}"?,0,0,0', lambda m: split_32(blockaddrs[m.groups(0)[0]][m.groups(0)[1]]), js)
   def blockaddrsize(js):
-    ret = re.sub(r'"?{{{ BA_([\w\d_$]+)\|([\w\d_$]+) }}}"?,0,0,0', lambda m: split_32(blockaddrs[m.groups(0)[0]][m.groups(0)[1]]), js)
-    return re.sub(r'"?{{{ BA_([\w\d_$]+)\|([\w\d_$]+) }}}"?', lambda m: str(blockaddrs[m.groups(0)[0]][m.groups(0)[1]]), ret)
+    return re.sub(r'"?{{{ BA_([\w\d_$]+)\|([\w\d_$]+) }}}"?', lambda m: str(blockaddrs[m.groups(0)[0]][m.groups(0)[1]]), js)
 
-  pre = blockaddrsize(indexize(pre))
+  pre = blockaddrsize(blockaddrsize_mem(indexize(indexize_mem(pre))))
 
   if settings.get('ASM_JS'):
     # move postsets into the asm module
@@ -410,6 +415,7 @@ def emscript(infile, settings, outfile, libraries=[], compiler_engine=None,
     simple = os.environ.get('EMCC_SIMPLE_ASM')
     class Counter:
       i = 0
+      j = 0
     pre_tables = last_forwarded_json['Functions']['tables']['pre']
     del last_forwarded_json['Functions']['tables']['pre']
 
@@ -424,13 +430,18 @@ def emscript(infile, settings, outfile, libraries=[], compiler_engine=None,
       end = raw.rindex(']')
       body = raw[start+1:end].split(',')
       for j in range(settings['RESERVED_FUNCTION_POINTERS']):
-        body[2 + 2*j] = 'jsCall_%s_%s' % (sig, j)
+        body[settings['FUNCTION_POINTER_ALIGNMENT'] * (1 + j)] = 'jsCall_%s_%s' % (sig, j)
+      Counter.j = 0
       def fix_item(item):
-        newline = '\n' in item
-        return (bad if item.replace('\n', '') == '0' else item) + ('\n' if newline else '')
+        Counter.j += 1
+        newline = Counter.j % 30 == 29
+        if item == '0': return bad if not newline else (bad + '\n')
+        return item if not newline else (item + '\n')
       body = ','.join(map(fix_item, body))
-      return ('function %s(%s) { %s %s(%d); %s }' % (bad, params, coercions, 'abort' if not settings['ASSERTIONS'] else 'nullFunc', i, ret), raw[:start+1] + body + raw[end:])
+      return ('function %s(%s) { %s %s(%d); %s }' % (bad, params, coercions, 'abort' if not settings['ASSERTIONS'] else 'nullFunc', i, ret), ''.join([raw[:start+1], body, raw[end:]]))
+
     infos = [make_table(sig, raw) for sig, raw in last_forwarded_json['Functions']['tables'].iteritems()]
+
     function_tables_defs = '\n'.join([info[0] for info in infos]) + '\n// EMSCRIPTEN_END_FUNCS\n' + '\n'.join([info[1] for info in infos])
 
     asm_setup = ''
@@ -470,6 +481,7 @@ def emscript(infile, settings, outfile, libraries=[], compiler_engine=None,
 
     function_tables = ['dynCall_' + table for table in last_forwarded_json['Functions']['tables']]
     function_tables_impls = []
+
     for sig in last_forwarded_json['Functions']['tables'].iterkeys():
       args = ','.join(['a' + str(i) for i in range(1, len(sig))])
       arg_coercions = ' '.join(['a' + str(i) + '=' + asm_coerce('a' + str(i), sig[i]) + ';' for i in range(1, len(sig))])
@@ -579,7 +591,7 @@ function stackAlloc(size) {
   var ret = 0;
   ret = STACKTOP;
   STACKTOP = (STACKTOP + size)|0;
-''' + ('STACKTOP = ((STACKTOP + 3)>>2)<<2;' if settings['TARGET_X86'] else 'STACKTOP = ((STACKTOP + 7)>>3)<<3;') + '''
+''' + ('STACKTOP = (STACKTOP + 3)&-4;' if settings['TARGET_X86'] else 'STACKTOP = (STACKTOP + 7)&-8;') + '''
   return ret|0;
 }
 function stackSave() {
@@ -685,7 +697,9 @@ Runtime.stackRestore = function(top) { asm['stackRestore'](top) };
             symbol_table[value] = str(i)
     outfile.write("var SYMBOL_TABLE = %s;" % json.dumps(symbol_table).replace('"', ''))
 
-  for funcs_js_item in funcs_js: # do this loop carefully to save memory
+  for i in range(len(funcs_js)): # do this loop carefully to save memory
+    funcs_js_item = funcs_js[i]
+    funcs_js[i] = None
     funcs_js_item = indexize(funcs_js_item)
     funcs_js_item = blockaddrsize(funcs_js_item)
     outfile.write(funcs_js_item)

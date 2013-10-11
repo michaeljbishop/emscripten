@@ -5,6 +5,11 @@
 
 var fastPaths = 0, slowPaths = 0;
 
+var tokenCache = {};
+['=', 'i32', 'label', ';', '4', '0', '1', '2', '255', 'align', 'i8*', 'i8', 'i16', 'getelementptr', 'inbounds', 'unnamed_addr', 'x', 'load', 'preds', 'br', 'i32*', 'i1', 'store', '<label>', 'constant', 'c', 'private', 'null', 'internal', 'to', 'bitcast', 'define', 'nounwind', 'nocapture', '%this', 'call', '...'].forEach(function(text) { tokenCache[text] = { text: text } });
+
+//var tokenCacheMisses = {};
+
 // Line tokenizer
 function tokenizer(item, inner) {
   //assert(item.lineNum != 40000);
@@ -12,7 +17,6 @@ function tokenizer(item, inner) {
   var tokens = [];
   var quotes = 0;
   var lastToken = null;
-  var CHUNKSIZE = 64; // How much forward to peek forward. Too much means too many string segments copied
   // Note: '{' is not an encloser, as its use in functions is split over many lines
   var enclosers = {
     '[': 0,
@@ -31,6 +35,15 @@ function tokenizer(item, inner) {
       return;
     }
 
+    var cached = tokenCache[text];
+    if (cached) {
+      //assert(cached.text === text);
+      tokens.push(cached);
+      lastToken = cached;
+      return;
+    }
+    //tokenCacheMisses[text] = (misses[text] || 0) + 1;
+
     var token = {
       text: text
     };
@@ -42,6 +55,10 @@ function tokenizer(item, inner) {
     }
     // merge certain tokens
     if (lastToken && isType(lastToken.text) && isFunctionDef(token)) {
+      if (lastToken.text in tokenCache) {
+        // create a copy of the cached value
+        lastToken = tokens[tokens.length-1] = { text: lastToken.text };
+      }
       lastToken.text += ' ' + text;
     } else if (lastToken && text[0] == '}') { // }, }*, etc.
       var openBrace = tokens.length-1;
@@ -766,15 +783,13 @@ function intertyper(lines, sidePass, baseLineNums) {
     return item;
   }
   // 'alloca'
-  var allocaPossibleVars = ['allocatedNum'];
   function allocaHandler(item) {
     item.intertype = 'alloca';
     item.allocatedType = item.tokens[1].text;
     if (item.tokens.length > 3 && Runtime.isNumberType(item.tokens[3].text)) {
-      item.allocatedNum = toNiceIdent(item.tokens[4].text);
-      item.possibleVars = allocaPossibleVars;
+      item.ident = toNiceIdent(item.tokens[4].text);
     } else {
-      item.allocatedNum = 1;
+      item.ident = 1;
     }
     item.type = addPointing(item.tokens[1].text); // type of pointer we will get
     Types.needAnalysis[item.type] = 0;
@@ -850,6 +865,7 @@ function intertyper(lines, sidePass, baseLineNums) {
       // TODO: also remove 2nd param?
     } else if (item.op in LLVM.COMPS) {
       item.type = 'i1';
+      if (item.params[1].intertype === 'type') item.params[1].intertype = 'value'; // parsed as type, but comparisons have just values there
     }
     if (USE_TYPED_ARRAYS == 2) {
       // Some specific corrections, since 'i64' is special
@@ -1013,7 +1029,8 @@ function intertyper(lines, sidePass, baseLineNums) {
         noteGlobalVariable(ret);
       }
     } else if (phase === 'funcs') {
-      if (m = /^  (%[\w\d\._]+) = (getelementptr|load) ([%\w\d\._ ,\*\-@]+)$/.exec(line.lineText)) {
+      // TODO: (void)call, store
+      if (m = /^  (%[\w\d\._]+) = (getelementptr|load|icmp) ([%\w\d\._ ,\*\-@]+)$/.exec(line.lineText)) {
         var assignTo = m[1];
         var intertype = m[2];
         var args = m[3];
@@ -1067,14 +1084,36 @@ function intertyper(lines, sidePass, baseLineNums) {
             }
             break;
           }
+          case 'icmp': {
+            var parts = args.split(' ');
+            assert(parts.length === 4);
+            ret = {
+              intertype: 'mathop',
+              op: 'icmp',
+              variant: parts[0],
+              lineNum: line.lineNum,
+              assignTo: toNiceIdent(assignTo),
+              params: [{
+                intertype: 'value',
+                ident: toNiceIdent(parts[2].substr(0, parts[2].length-1)),
+                type: parts[1]
+              }, {
+                intertype: 'value',
+                ident: toNiceIdent(parts[3]),
+                type: parts[1]
+              }],
+              type: 'i1',
+            };
+            break;
+          }
           default: throw 'unexpected fast path type ' + intertype;
         }
-        //else if (line.lineText.indexOf(' = load ') > 0) printErr('close: ' + JSON.stringify(line.lineText));
       }
+      //else if (line.lineText.indexOf(' = icmp ') > 0) printErr('close: ' + JSON.stringify(line.lineText));
     }
     if (ret) {
       if (COMPILER_ASSERTIONS) {
-        //printErr(['\n', JSON.stringify(ret), '\n', JSON.stringify(triager(tokenizer(line)))]);
+        //printErr(['\n', dump(ret), '\n', dump(triager(tokenizer(line)))]);
         var normal = triager(tokenizer(line));
         delete normal.tokens;
         delete normal.indent;
@@ -1087,11 +1126,14 @@ function intertyper(lines, sidePass, baseLineNums) {
   // Input
 
   lineSplitter().forEach(function(line) {
-    var item = tryFastPaths(line);
-    if (item) {
-      finalResults.push(item);
-      fastPaths++;
-      return;
+    var item;
+    if (COMPILER_FASTPATHS) {
+      item = tryFastPaths(line);
+      if (item) {
+        finalResults.push(item);
+        fastPaths++;
+        return;
+      }
     }
     slowPaths++;
 

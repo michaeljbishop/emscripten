@@ -640,11 +640,33 @@ function stringToUTF32(str, outPtr) {
 }
 Module['stringToUTF32'] = stringToUTF32;
 
+function demangle(func) {
+  if (typeof func === 'number') func = Pointer_stringify(func);
+  assert(func[0] === '_');
+  if (func[1] !== '_') return func.substr(1); // C function
+  assert(func[2] === 'Z');
+  if (func[3] !== 'N') {
+    // not namespaced
+    var m = /(\d+)([^\d].*)/.exec(func.substr(3));
+    return m[2].substr(0, m[1]);
+  }
+  // namespaced N-E
+  var i = 4, ret = [];
+  while (func[i] !== 'E') {
+    var size = parseInt(func.substr(i));
+    var pre = size.toString().length;
+    ret.push(func.substr(i + pre, size));
+    i += pre + size;
+    assert(pre > 0 && size > 0 && i < func.length);
+  }
+  return ret.join('::');
+}
+
 // Memory management
 
 var PAGE_SIZE = 4096;
 function alignMemoryPage(x) {
-  return ((x+4095)>>12)<<12;
+  return (x+4095)&-4096;
 }
 
 var HEAP;
@@ -942,6 +964,24 @@ if (!Math['toFloat32']) Math['toFloat32'] = function(x) {
 };
 Math.toFloat32 = Math['toFloat32'];
 #endif
+
+var Math_abs = Math.abs;
+var Math_cos = Math.cos;
+var Math_sin = Math.sin;
+var Math_tan = Math.tan;
+var Math_acos = Math.acos;
+var Math_asin = Math.asin;
+var Math_atan = Math.atan;
+var Math_atan2 = Math.atan2;
+var Math_exp = Math.exp;
+var Math_log = Math.log;
+var Math_sqrt = Math.sqrt;
+var Math_ceil = Math.ceil;
+var Math_floor = Math.floor;
+var Math_pow = Math.pow;
+var Math_imul = Math.imul;
+var Math_toFloat32 = Math.toFloat32;
+var Math_min = Math.min;
 
 // A counter of dependencies for calling run(). If we need to
 // do asynchronous work before running, increment this and
