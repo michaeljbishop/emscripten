@@ -866,6 +866,9 @@ keydown(100);keyup(100); // trigger the end
   def test_glut_touchevents(self):
     self.btest('glut_touchevents.c', '1')
 
+  def test_glut_wheelevents(self):
+    self.btest('glut_wheelevents.c', '1')
+
   def test_emscripten_get_now(self):
     self.btest('emscripten_get_now.cpp', '1')
 
@@ -1389,7 +1392,7 @@ keydown(100);keyup(100); // trigger the end
 
   def test_sdl_rotozoom(self):
     shutil.copyfile(path_from_root('tests', 'screenshot.png'), os.path.join(self.get_dir(), 'screenshot.png'))
-    self.btest('sdl_rotozoom.c', reference='sdl_rotozoom.png', args=['--preload-file', 'screenshot.png'], reference_slack=5)
+    self.btest('sdl_rotozoom.c', reference='sdl_rotozoom.png', args=['--preload-file', 'screenshot.png'])
 
   def test_sdl_gfx_primitives(self):
     self.btest('sdl_gfx_primitives.c', reference='sdl_gfx_primitives.png', reference_slack=1)

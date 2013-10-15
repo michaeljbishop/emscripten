@@ -407,6 +407,9 @@ function JSify(data, functionsOnly, givenFunctions) {
       var snippet = LibraryManager.library[ident];
       var redirectedIdent = null;
       var deps = LibraryManager.library[ident + '__deps'] || [];
+      deps.forEach(function(dep) {
+        if (typeof snippet === 'string' && !(dep in LibraryManager.library)) warn('missing library dependency ' + dep + ', make sure you are compiling with the right options (see #ifdefs in src/library*.js)');
+      });
       var isFunction = false;
 
       if (typeof snippet === 'string') {
@@ -1372,7 +1375,7 @@ function JSify(data, functionsOnly, givenFunctions) {
     
     // store current list offset in tempInt, advance list offset by STACK_ALIGN, return list entry stored at tempInt
     return '(tempInt=' + makeGetValue(ident, Runtime.QUANTUM_SIZE, '*') + ',' +
-                         makeSetValue(ident, Runtime.QUANTUM_SIZE, 'tempInt + ' + move, '*') + ',' +
+                         makeSetValue(ident, Runtime.QUANTUM_SIZE, 'tempInt + ' + move, '*', null, null, null, null, ',') + ',' +
                          makeGetValue(makeGetValue(ident, 0, '*'), 'tempInt', item.type) + ')';
   }
 

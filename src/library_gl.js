@@ -4047,7 +4047,10 @@ var LibraryGL = {
     _glColor4f({{{ makeGetValue('p', '0', 'float') }}}, {{{ makeGetValue('p', '4', 'float') }}}, {{{ makeGetValue('p', '8', 'float') }}}, {{{ makeGetValue('p', '12', 'float') }}});
   },
 
-  glColor4ubv: function() { throw 'glColor4ubv not implemented' },
+  glColor4ubv__deps: ['glColor4ub'],
+  glColor4ubv: function(p) {
+    _glColor4ub({{{ makeGetValue('p', '0', 'i8') }}}, {{{ makeGetValue('p', '1', 'i8') }}}, {{{ makeGetValue('p', '2', 'i8') }}}, {{{ makeGetValue('p', '3', 'i8') }}});
+	},
 
   glFogf: function(pname, param) { // partial support, TODO
     switch(pname) {
@@ -4470,6 +4473,7 @@ var LibraryGL = {
     return 1 /* GL_TRUE */;
   },
 
+  gluOrtho2D__deps: ['glOrtho'],
   gluOrtho2D: function(left, right, bottom, top) {
     _glOrtho(left, right, bottom, top, -1, 1);
   },
