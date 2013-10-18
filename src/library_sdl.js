@@ -384,7 +384,7 @@ var LibrarySDL = {
           SDL.DOMButtons[0] = 0;
           SDL.events.push(mouseEvent);
           
-          for (i = 0; i < event.changedTouches.length; i++) {
+          for (i=0;i<event.changedTouches.length;i++) {
             var touch = event.changedTouches[i];
             SDL.events.push({
               type: 'touchend',
@@ -685,9 +685,9 @@ var LibrarySDL = {
           var ly = Browser.lastTouches[touch.identifier].y / h;
           var dx = x - lx;
           var dy = y - ly;
-          if (touch['deviceID'] === undefined)
+          if ( touch['deviceID'] === undefined )
             touch.deviceID = SDL.TOUCH_DEFAULT_ID;
-          if (dx === 0 && dy === 0 && event.type === 'touchmove') return; // don't send these if nothing happened
+          if ( dx === 0 && dy === 0 && event.type === 'touchmove' ) return; // don't send these if nothing happened
           {{{ makeSetValue('ptr', C_STRUCTS.SDL_TouchFingerEvent.type, 'SDL.DOMEventToSDLEvent[event.type]', 'i32') }}};
           {{{ makeSetValue('ptr', C_STRUCTS.SDL_TouchFingerEvent.timestamp, '0', 'i32') }}}; // XXX michaeljbishop - Unimplemented for now
           {{{ makeSetValue('ptr', C_STRUCTS.SDL_TouchFingerEvent.touchId, 'touch.deviceID', 'i64') }}};
@@ -792,17 +792,17 @@ var LibrarySDL = {
     SDL.keyboardState = _malloc(0x10000); // Our SDL needs 512, but 64K is safe for older SDLs
     _memset(SDL.keyboardState, 0, 0x10000);
     // Initialize this structure carefully for closure
-    SDL.DOMEventToSDLEvent['keydown'] = 0x300 /* SDL_KEYDOWN */;
-    SDL.DOMEventToSDLEvent['keyup'] = 0x301 /* SDL_KEYUP */;
-    SDL.DOMEventToSDLEvent['keypress'] = 0x303 /* SDL_TEXTINPUT */;
-    SDL.DOMEventToSDLEvent['mousedown'] = 0x401 /* SDL_MOUSEBUTTONDOWN */;
-    SDL.DOMEventToSDLEvent['mouseup'] = 0x402 /* SDL_MOUSEBUTTONUP */;
-    SDL.DOMEventToSDLEvent['mousemove'] = 0x400 /* SDL_MOUSEMOTION */;
+    SDL.DOMEventToSDLEvent['keydown']    = 0x300  /* SDL_KEYDOWN */;
+    SDL.DOMEventToSDLEvent['keyup']      = 0x301  /* SDL_KEYUP */;
+    SDL.DOMEventToSDLEvent['keypress']   = 0x303  /* SDL_TEXTINPUT */;
+    SDL.DOMEventToSDLEvent['mousedown']  = 0x401  /* SDL_MOUSEBUTTONDOWN */;
+    SDL.DOMEventToSDLEvent['mouseup']    = 0x402  /* SDL_MOUSEBUTTONUP */;
+    SDL.DOMEventToSDLEvent['mousemove']  = 0x400  /* SDL_MOUSEMOTION */;
     SDL.DOMEventToSDLEvent['touchstart'] = 0x700  /* SDL_FINGERDOWN */;
     SDL.DOMEventToSDLEvent['touchend']   = 0x701  /* SDL_FINGERUP */;
     SDL.DOMEventToSDLEvent['touchmove']  = 0x702  /* SDL_FINGERMOTION */;
-    SDL.DOMEventToSDLEvent['unload'] = 0x100 /* SDL_QUIT */;
-    SDL.DOMEventToSDLEvent['resize'] = 0x7001 /* SDL_VIDEORESIZE/SDL_EVENT_COMPAT2 */;
+    SDL.DOMEventToSDLEvent['unload']     = 0x100  /* SDL_QUIT */;
+    SDL.DOMEventToSDLEvent['resize']     = 0x7001 /* SDL_VIDEORESIZE/SDL_EVENT_COMPAT2 */;
     return 0; // success
   },
 
@@ -1285,8 +1285,8 @@ var LibrarySDL = {
             retrievedEventCount++;
           } else {
             index++;
+          }
         }
-      }
         return retrievedEventCount;
       }
       default: throw 'SDL_PeepEvents does not yet support that action: ' + action;
@@ -1679,7 +1679,7 @@ var LibrarySDL = {
               ++SDL.audio.numAudioTimersPending;
               Browser.safeSetTimeout(SDL.audio.caller, 1.0);
             }
-          } catch(e) {
+    } catch(e) {
             console.log('Web Audio API error playing back audio: ' + e.toString());
           }
         }
@@ -1709,7 +1709,7 @@ var LibrarySDL = {
         {{{ makeSetValue('obtained', C_STRUCTS.SDL_AudioSpec.samples, 0, 'i16') }}};
         {{{ makeSetValue('obtained', C_STRUCTS.SDL_AudioSpec.callback, 0, '*') }}};
         {{{ makeSetValue('obtained', C_STRUCTS.SDL_AudioSpec.userdata, 0, '*') }}};
-      }
+    }
     }
     if (!SDL.audio) {
       return -1;

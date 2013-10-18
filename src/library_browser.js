@@ -475,7 +475,7 @@ mergeInto(LibraryManager.library, {
             Browser.touches[touch.identifier] = coords;
           } else if (event.type === 'touchend' || event.type === 'touchmove') {
             Browser.lastTouches[touch.identifier] = Browser.touches[touch.identifier];
-            Browser.touches[touch.identifier] = { x: adjustedX, y: adjustedY };
+            Browser.touches[touch.identifier] = {x: adjustedX, y: adjustedY};
           } 
           return;
         }
