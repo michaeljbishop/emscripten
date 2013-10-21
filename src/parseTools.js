@@ -230,9 +230,9 @@ function isFunctionDef(token, out) {
   if (nonPointing[0] != '(' || nonPointing.substr(-1) != ')')
     return false;
   if (nonPointing === '()') return true;
-  if (!token.item) return false;
+  if (!token.tokens) return false;
   var fail = false;
-  var segments = splitTokenList(token.item.tokens);
+  var segments = splitTokenList(token.tokens);
   segments.forEach(function(segment) {
     var subtext = segment[0].text;
     fail = fail || segment.length > 1 || !(isType(subtext) || subtext == '...');
@@ -280,7 +280,7 @@ function isFunctionType(type, out) {
     i--;
   }
   assert(argText);
-  return isFunctionDef({ text: argText, item: tokenize(argText.substr(1, argText.length-2)) }, out);
+  return isFunctionDef({ text: argText, tokens: tokenize(argText.substr(1, argText.length-2)) }, out);
 }
 
 function getReturnType(type) {
@@ -322,6 +322,32 @@ function countNormalArgs(type, out, legalized) {
   }
   if (isVarArgsFunctionType(type)) ret--;
   return ret;
+}
+
+function getVectorSize(type) {
+  return parseInt(type.substring(1, type.indexOf(' ')));
+}
+
+function getVectorBaseType(type) {
+  Types.usesSIMD = true;
+  switch (type) {
+    case '<2 x float>':
+    case '<4 x float>': return 'float';
+    case '<2 x i32>':
+    case '<4 x i32>': return 'uint';
+    default: throw 'unknown vector type ' + type;
+  }
+}
+
+function getVectorNativeType(type) {
+  Types.usesSIMD = true;
+  switch (type) {
+    case '<2 x float>':
+    case '<4 x float>': return 'float';
+    case '<2 x i32>':
+    case '<4 x i32>': return 'i32';
+    default: throw 'unknown vector type ' + type;
+  }
 }
 
 function addIdent(token) {
@@ -376,7 +402,6 @@ var SPLIT_TOKEN_LIST_SPLITTERS = set(',', 'to'); // 'to' can separate parameters
 function splitTokenList(tokens) {
   if (tokens.length == 0) return [];
   if (!tokens.slice) tokens = tokens.tokens;
-  if (tokens.slice(-1)[0].text != ',') tokens.push({text:','});
   var ret = [];
   var seg = [];
   for (var i = 0; i < tokens.length; i++) {
@@ -386,24 +411,22 @@ function splitTokenList(tokens) {
       seg = [];
     } else if (token.text == ';') {
       ret.push(seg);
-      break;
+      return ret;
     } else {
       seg.push(token);
     }
   }
+  if (seg.length) ret.push(seg);
   return ret;
 }
 
 function parseParamTokens(params) {
   if (params.length === 0) return [];
   var ret = [];
-  if (params[params.length-1].text != ',') {
-    params.push({ text: ',' });
-  }
   var anonymousIndex = 0;
   while (params.length > 0) {
     var i = 0;
-    while (params[i].text != ',') i++;
+    while (i < params.length && params[i].text != ',') i++;
     var segment = params.slice(0, i);
     params = params.slice(i+1);
     segment = cleanSegment(segment);
@@ -588,6 +611,16 @@ function parseLLVMSegment(segment) {
     return parseBlockAddress(segment);
   } else {
     type = segment[0].text;
+    if (type[type.length-1] === '>' && segment[1].text[0] === '<') {
+      // vector literal
+      return {
+        intertype: 'vector',
+        idents: splitTokenList(segment[1].tokens).map(function(pair) {
+          return pair[1].text;
+        }),
+        type: type
+      };
+    }
     Types.needAnalysis[type] = 0;
     return {
       intertype: 'value',
@@ -618,13 +651,13 @@ function parseLLVMFunctionCall(segment) {
   segment = cleanSegment(segment);
   // Remove additional modifiers
   var variant = null;
-  if (!segment[2] || !segment[2].item) {
+  if (!segment[2] || !segment[2].tokens) {
     variant = segment.splice(2, 1)[0];
     if (variant && variant.text) variant = variant.text; // needed for mathops
   }
   assertTrue(['inreg', 'byval'].indexOf(segment[1].text) == -1);
   assert(segment[1].text in PARSABLE_LLVM_FUNCTIONS);
-  while (!segment[2].item) {
+  while (!segment[2].tokens) {
     segment.splice(2, 1); // Remove modifiers
     if (!segment[2]) throw 'Invalid segment!';
   }
@@ -633,15 +666,15 @@ function parseLLVMFunctionCall(segment) {
   if (type === '?') {
     if (intertype === 'getelementptr') {
       type = '*'; // a pointer, we can easily say, this is
-    } else if (segment[2].item.tokens.slice(-2)[0].text === 'to') {
-      type = segment[2].item.tokens.slice(-1)[0].text;
+    } else if (segment[2].tokens.slice(-2)[0].text === 'to') {
+      type = segment[2].tokens.slice(-1)[0].text;
     }
   }
   var ret = {
     intertype: intertype,
     variant: variant,
     type: type,
-    params: parseParamTokens(segment[2].item.tokens)
+    params: parseParamTokens(segment[2].tokens)
   };
   Types.needAnalysis[ret.type] = 0;
   ret.ident = toNiceIdent(ret.params[0].ident || 'NOIDENT');
@@ -1000,9 +1033,11 @@ function generateStructTypes(type) {
   var ret = new Array(size);
   var index = 0;
   function add(typeData) {
+    var array = typeData.name_[0] === '['; // arrays just have 2 elements in their fields, see calculateStructAlignment
+    var num = array ? parseInt(typeData.name_.substr(1)) : typeData.fields.length;
     var start = index;
-    for (var i = 0; i < typeData.fields.length; i++) {
-      var type = typeData.fields[i];
+    for (var i = 0; i < num; i++) {
+      var type = array ? typeData.fields[0] : typeData.fields[i];
       if (!SAFE_HEAP && isPointerType(type)) type = '*'; // do not include unneeded type names without safe heap
       if (Runtime.isNumberType(type) || isPointerType(type)) {
         if (USE_TYPED_ARRAYS == 2 && type == 'i64') {
@@ -1025,7 +1060,10 @@ function generateStructTypes(type) {
         }
         add(Types.types[type]);
       }
-      var more = (i+1 < typeData.fields.length ? typeData.flatIndexes[i+1] : typeData.flatSize) - (index - start);
+      var more = array ? (i+1)*typeData.flatSize/num : (
+        (i+1 < typeData.fields.length ? typeData.flatIndexes[i+1] : typeData.flatSize)
+      );
+      more -= index - start;
       for (var j = 0; j < more; j++) {
         ret[index++] = 0;
       }
@@ -1771,11 +1809,13 @@ function makeGetSlabs(ptr, type, allowMultiple, unsigned) {
     switch(type) {
       case 'i1': case 'i8': return [unsigned ? 'HEAPU8' : 'HEAP8']; break;
       case 'i16': return [unsigned ? 'HEAPU16' : 'HEAP16']; break;
+      case '<4 x i32>': case 'uint':
       case 'i32': case 'i64': return [unsigned ? 'HEAPU32' : 'HEAP32']; break;
       case 'double': {
         if (TARGET_LE32) return ['HEAPF64']; // in le32, we do have the ability to assume 64-bit alignment
         // otherwise, fall through to float
       }
+      case '<4 x float>':
       case 'float': return ['HEAPF32'];
       default: {
         throw 'what, exactly, can we do for unknown types in TA2?! ' + [new Error().stack, ptr, type, allowMultiple, unsigned];
@@ -1983,6 +2023,8 @@ function finalizeLLVMParameter(param, noIndexizeFunctions) {
     return param.ident; // we don't really want the type here
   } else if (param.intertype == 'mathop') {
     return processMathop(param);
+  } else if (param.intertype === 'vector') {
+    return 'float32x4(' + param.idents.join(',') + ')';
   } else {
     throw 'invalid llvm parameter: ' + param.intertype;
   }
@@ -2318,6 +2360,34 @@ function processMathop(item) {
     }
   }
 
+  if (type[0] === '<' && type[type.length-1] !== '*') {
+    // vector/SIMD operation
+    Types.usesSIMD = true;
+    switch (op) {
+      case 'fadd': return 'SIMD.add(' + idents[0] + ',' + idents[1] + ')';
+      case 'fsub': return 'SIMD.sub(' + idents[0] + ',' + idents[1] + ')';
+      case 'fmul': return 'SIMD.mul(' + idents[0] + ',' + idents[1] + ')';
+      case 'fdiv': return 'SIMD.div(' + idents[0] + ',' + idents[1] + ')';
+      case 'add' : return 'SIMD.addu32(' + idents[0] + ',' + idents[1] + ')';
+      case 'sub' : return 'SIMD.subu32(' + idents[0] + ',' + idents[1] + ')';
+      case 'mul' : return 'SIMD.mulu32(' + idents[0] + ',' + idents[1] + ')';
+      case 'udiv': return 'SIMD.divu32(' + idents[0] + ',' + idents[1] + ')';
+      case 'bitcast': {
+        var inType = item.params[0].type;
+        var outType = item.type;
+        if (inType === '<4 x float>') {
+          assert(outType === '<4 x i32>');
+          return 'SIMD.float32x4BitsToUint32x4(' + idents[0] + ')';
+        } else {
+          assert(inType === '<4 x i32>');
+          assert(outType === '<4 x float>');
+          return 'SIMD.uint32x4BitsToFloat32x4(' + idents[0] + ')';
+        }
+      }
+      default: throw 'vector op todo: ' + dump(item);
+    }
+  }
+
   switch (op) {
     // basic integer ops
     case 'add': return handleOverflow(getFastValue(idents[0], '+', idents[1], item.type), bits);
@@ -2496,7 +2566,7 @@ function walkAndModifyInterdata(item, pre) {
 }
 
 function parseBlockAddress(segment) {
-  return { intertype: 'blockaddress', func: toNiceIdent(segment[2].item.tokens[0].text), label: toNiceIdent(segment[2].item.tokens[2].text), type: 'i32' };
+  return { intertype: 'blockaddress', func: toNiceIdent(segment[2].tokens[0].text), label: toNiceIdent(segment[2].tokens[2].text), type: 'i32' };
 }
 
 function finalizeBlockAddress(param) {
@@ -2598,5 +2668,13 @@ function addVariable(ident, type, funcData) {
       impl: VAR_EMULATED
     };
   }
+}
+
+var SIMDLane = ['X', 'Y', 'Z', 'W'];
+var simdLane = ['x', 'y', 'z', 'w'];
+
+function ensureVector(ident, base) {
+  Types.usesSIMD = true;
+  return ident == 0 ? base + '32x4.zero()' : ident;
 }
 

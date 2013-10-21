@@ -31,8 +31,8 @@ Most normal gcc/g++ options will work, for example:
   --version                Display compiler version information
 
 Options that are modified or new in %s include:
-  -O0                      No optimizations (default)
-''' % (shortcompiler, shortcompiler), output[0].replace('\r', ''), output[1].replace('\r', ''))
+
+  -O0                      No optimizations (default)''' % (shortcompiler, shortcompiler), output[0].replace('\r', ''), output[1].replace('\r', ''))
 
       # emcc src.cpp ==> writes a.out.js
       self.clear()
@@ -1473,6 +1473,8 @@ f.close()
       assert os.path.exists('a.out.js')
 
   def test_toobig(self):
+    # very large [N x i8], we should not oom in the compiler
+    self.clear()
     open(os.path.join(self.get_dir(), 'main.cpp'), 'w').write(r'''
       #include <stdio.h>
 
@@ -1496,8 +1498,8 @@ f.close()
       }
     ''')
     output = Popen([PYTHON, EMCC, os.path.join(self.get_dir(), 'main.cpp')], stderr=PIPE).communicate()[1]
-    assert 'Emscripten failed' in output, output
-    assert 'warning: very large fixed-size structural type' in output, output
+    print output
+    assert os.path.exists('a.out.js')
 
   def test_prepost(self):
     open(os.path.join(self.get_dir(), 'main.cpp'), 'w').write('''
@@ -1959,4 +1961,101 @@ a(int [32], char [5]*)
     # test for multiple functions in one stack trace
     assert 'one(int)' in output
     assert 'two(char)' in output
+
+  def test_module_exports_with_closure(self):
+    # This test checks that module.export is retained when JavaScript is minified by compiling with --closure 1
+    # This is important as if module.export is not present the Module object will not be visible to node.js
+    # Run with ./runner.py other.test_module_exports_with_closure
+
+    # First make sure test.js isn't present.
+    try_delete(path_from_root('tests', 'Module-exports', 'test.js'))
+    assert not os.path.exists(path_from_root('tests', 'Module-exports', 'test.js'))
+
+    # compile with -O2 --closure 0
+    Popen([PYTHON, EMCC, path_from_root('tests', 'Module-exports', 'test.c'), '-o', path_from_root('tests', 'Module-exports', 'test.js'), '-O2', '--closure', '0', '--pre-js', path_from_root('tests', 'Module-exports', 'setup.js'), '-s', 'EXPORTED_FUNCTIONS=["_bufferTest"]'], stdout=PIPE, stderr=PIPE).communicate()
+
+    # Check that compilation was successful
+    assert os.path.exists(path_from_root('tests', 'Module-exports', 'test.js'))
+    test_js_closure_0 = open(path_from_root('tests', 'Module-exports', 'test.js')).read()
+
+    # Check that test.js compiled with --closure 0 contains "module['exports'] = Module;"
+    assert "module['exports'] = Module;" in test_js_closure_0
+
+    # Check that main.js (which requires test.js) completes successfully when run in node.js
+    # in order to check that the exports are indeed functioning correctly.
+    if NODE_JS in JS_ENGINES:
+      self.assertContained('bufferTest finished', run_js(path_from_root('tests', 'Module-exports', 'main.js'), engine=NODE_JS))
+
+    # Delete test.js again and check it's gone.
+    try_delete(path_from_root('tests', 'Module-exports', 'test.js'))
+    assert not os.path.exists(path_from_root('tests', 'Module-exports', 'test.js'))
+
+    # compile with -O2 --closure 1
+    Popen([PYTHON, EMCC, path_from_root('tests', 'Module-exports', 'test.c'), '-o', path_from_root('tests', 'Module-exports', 'test.js'), '-O2', '--closure', '1', '--pre-js', path_from_root('tests', 'Module-exports', 'setup.js'), '-s', 'EXPORTED_FUNCTIONS=["_bufferTest"]'], stdout=PIPE, stderr=PIPE).communicate()
+
+    # Check that compilation was successful
+    assert os.path.exists(path_from_root('tests', 'Module-exports', 'test.js'))
+    test_js_closure_1 = open(path_from_root('tests', 'Module-exports', 'test.js')).read()
+
+    # Check that test.js compiled with --closure 1 contains "module.exports", we want to verify that
+    # "module['exports']" got minified to "module.exports" when compiling with --closure 1
+    assert "module.exports" in test_js_closure_1
+
+    # Check that main.js (which requires test.js) completes successfully when run in node.js
+    # in order to check that the exports are indeed functioning correctly.
+    if NODE_JS in JS_ENGINES:
+      self.assertContained('bufferTest finished', run_js(path_from_root('tests', 'Module-exports', 'main.js'), engine=NODE_JS))
+
+    # Tidy up files that might have been created by this test.
+    try_delete(path_from_root('tests', 'Module-exports', 'test.js'))
+    try_delete(path_from_root('tests', 'Module-exports', 'test.js.map'))
+
+  def test_simd(self):
+    self.clear()
+    Popen([PYTHON, EMCC, path_from_root('tests', 'linpack.c'), '-O2', '-DSP', '--llvm-opts', '''['-O3', '-vectorize', '-vectorize-loops', '-bb-vectorize-vector-bits=128', '-force-vector-width=4']''']).communicate()
+    self.assertContained('Unrolled Single  Precision', run_js('a.out.js'))
+
+  def test_simd2(self):
+    self.clear()
+    open('src.cpp', 'w').write(r'''
+#include <stdio.h>
+
+#include <emscripten/vector.h>
+
+int main(int argc, char **argv) {
+  float data[8];
+  for (int i = 0; i < 32; i++) data[i] = (1+i+argc)*(2+i+argc*argc);
+  {
+    float32x4 *a = (float32x4*)&data[0];
+    float32x4 *b = (float32x4*)&data[4];
+    float32x4 c, d;
+    c = *a;
+    d = *b;
+    printf("floats! %d, %d, %d, %d   %d, %d, %d, %d\n", (int)c[0], (int)c[1], (int)c[2], (int)c[3], (int)d[0], (int)d[1], (int)d[2], (int)d[3]);
+    c = c+d;
+    printf("floats! %d, %d, %d, %d   %d, %d, %d, %d\n", (int)c[0], (int)c[1], (int)c[2], (int)c[3], (int)d[0], (int)d[1], (int)d[2], (int)d[3]);
+    d = c*d;
+    printf("floats! %d, %d, %d, %d   %d, %d, %d, %d\n", (int)c[0], (int)c[1], (int)c[2], (int)c[3], (int)d[0], (int)d[1], (int)d[2], (int)d[3]);
+  }
+  {
+    uint32x4 *a = (uint32x4*)&data[0];
+    uint32x4 *b = (uint32x4*)&data[4];
+    uint32x4 c, d, e, f;
+    c = *a;
+    d = *b;
+    printf("uints! %d, %d, %d, %d   %d, %d, %d, %d\n", c[0], c[1], c[2], c[3], d[0], d[1], d[2], d[3]);
+    e = c+d;
+    f = c-d;
+    printf("uints! %d, %d, %d, %d   %d, %d, %d, %d\n", e[0], e[1], e[2], e[3], f[0], f[1], f[2], f[3]);
+  }
+  return 0;
+}
+    ''')
+    Popen([PYTHON, EMCC, 'src.cpp', '-O2']).communicate()
+    self.assertContained('''floats! 6, 12, 20, 30   42, 56, 72, 90
+floats! 48, 68, 92, 120   42, 56, 72, 90
+floats! 48, 68, 92, 120   2016, 3808, 6624, 10800
+uints! 1086324736, 1094713344, 1101004800, 1106247680   1109917696, 1113587712, 1116733440, 1119092736
+uints! -2098724864, -2086666240, -2077229056, -2069626880   -23592960, -18874368, -15728640, -12845056
+''', run_js('a.out.js'))
 

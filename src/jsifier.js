@@ -20,6 +20,7 @@ var functionStubSigs = {};
 
 // JSifier
 function JSify(data, functionsOnly, givenFunctions) {
+  //B.start('jsifier');
   var mainPass = !functionsOnly;
 
   var itemsDict = { type: [], GlobalVariableStub: [], functionStub: [], function: [], GlobalVariable: [], GlobalVariablePostSet: [] };
@@ -67,7 +68,9 @@ function JSify(data, functionsOnly, givenFunctions) {
 
     // Add additional necessary items for the main pass. We can now do this since types are parsed (types can be used through
     // generateStructInfo in library.js)
+    //B.start('jsifier-libload');
     LibraryManager.load();
+    //B.stop('jsifier-libload');
 
     if (phase == 'pre') {
       var libFuncsToInclude;
@@ -153,7 +156,7 @@ function JSify(data, functionsOnly, givenFunctions) {
       }
       // Add current value(s)
       var currValue = values[i];
-      if (USE_TYPED_ARRAYS == 2 && typeData.fields[i] == 'i64') {
+      if (USE_TYPED_ARRAYS == 2 && (typeData.fields[i] == 'i64' || (typeData.flatFactor && typeData.fields[0] == 'i64'))) {
         // 'flatten' out the 64-bit value into two 32-bit halves
         var parts = parseI64Constant(currValue, true);
         ret[index++] = parts[0];
@@ -272,20 +275,14 @@ function JSify(data, functionsOnly, givenFunctions) {
     }
 
     if (isBSS(item)) {
-      var length = calcAllocatedSize(item.type);
-      length = Runtime.alignMemory(length);
-
       // If using indexed globals, go ahead and early out (no need to explicitly
       // initialize).
-      if (!NAMED_GLOBALS) {
-        return;
-      }
+      if (!NAMED_GLOBALS) return;
+
       // If using named globals, we can at least shorten the call to allocate by
       // passing an integer representing the size of memory to alloc instead of
       // an array of 0s of size length.
-      else {
-        constant = length;
-      }
+      constant = Runtime.alignMemory(calcAllocatedSize(item.type));
     } else {
       if (item.external) {
         if (Runtime.isNumberType(item.type) || isPointerType(item.type)) {
@@ -326,12 +323,9 @@ function JSify(data, functionsOnly, givenFunctions) {
       }
 
       // ensure alignment
-      constant = constant.concat(zeros(Runtime.alignMemory(constant.length) - constant.length));
-
-      // Special case: class vtables. We make sure they are null-terminated, to allow easy runtime operations
-      if (item.ident.substr(0, 5) == '__ZTV') {
-        constant = constant.concat(zeros(Runtime.alignMemory(QUANTUM_SIZE)));
-      }
+      var extra = Runtime.alignMemory(constant.length) - constant.length;
+      if (item.ident.substr(0, 5) == '__ZTV') extra += Runtime.alignMemory(QUANTUM_SIZE);
+      while (extra-- > 0) constant.push(0);
     }
 
     // NOTE: This is the only place that could potentially create static
@@ -513,6 +507,7 @@ function JSify(data, functionsOnly, givenFunctions) {
   // function splitter
   function functionSplitter(item) {
     item.lines.forEach(function(line) {
+      //B.start('jsifier-handle-' + line.intertype);
       Framework.currItem = line;
       line.funcData = item; // TODO: remove all these, access it globally
       switch (line.intertype) {
@@ -531,6 +526,9 @@ function JSify(data, functionsOnly, givenFunctions) {
         case 'load': line.JS = loadHandler(line); break;
         case 'extractvalue': line.JS = extractvalueHandler(line); break;
         case 'insertvalue': line.JS = insertvalueHandler(line); break;
+        case 'insertelement': line.JS = insertelementHandler(line); break;
+        case 'extracttelement': line.JS = extractelementHandler(line); break;
+        case 'shufflevector': line.JS = shufflevectorHandler(line); break;
         case 'indirectbr': line.JS = indirectbrHandler(line); break;
         case 'alloca': line.JS = allocaHandler(line); break;
         case 'va_arg': line.JS = va_argHandler(line); break;
@@ -544,8 +542,11 @@ function JSify(data, functionsOnly, givenFunctions) {
       //if (ASM_JS) assert(line.JS.indexOf('var ') < 0, dump(line));
       if (line.assignTo) makeAssign(line);
       Framework.currItem = null;
+      //B.stop('jsifier-handle-' + line.intertype);
     });
+    //B.start('jsifier-frec');
     functionReconstructor(item);
+    //B.stop('jsifier-frec');
   }
 
   // function for filtering functions for label debugging
@@ -769,6 +770,7 @@ function JSify(data, functionsOnly, givenFunctions) {
         ret += '\n';
       } else {
         // Reloop multiple blocks using the compiled relooper
+        //B.start('jsifier-reloop');
 
         //Relooper.setDebug(1);
         Relooper.init();
@@ -818,6 +820,7 @@ function JSify(data, functionsOnly, givenFunctions) {
         }
         ret += Relooper.render(blockMap[block.entries[0]]);
         Relooper.cleanup();
+        //B.stop('jsifier-reloop');
       }
       return ret;
     }
@@ -942,6 +945,14 @@ function JSify(data, functionsOnly, givenFunctions) {
     var impl = VAR_EMULATED;
     if (item.pointer.intertype == 'value') {
       impl = getVarImpl(item.funcData, item.ident);
+    }
+    if (item.valueType[item.valueType.length-1] === '>') {
+      // vector store TODO: move to makeSetValue?
+      var base = getVectorBaseType(item.valueType);
+      return '(' + makeSetValue(item.ident,  0, value + '.x', base, 0, 0, item.align) + ',' +
+                   makeSetValue(item.ident,  4, value + '.y', base, 0, 0, item.align) + ',' +
+                   makeSetValue(item.ident,  8, value + '.z', base, 0, 0, item.align) + ',' +
+                   makeSetValue(item.ident, 12, value + '.w', base, 0, 0, item.align) + ')';
     }
     switch (impl) {
       case VAR_NATIVIZED:
@@ -1310,6 +1321,14 @@ function JSify(data, functionsOnly, givenFunctions) {
   }
   function loadHandler(item) {
     var value = finalizeLLVMParameter(item.pointer);
+    if (item.valueType[item.valueType.length-1] === '>') {
+      // vector load
+      var base = getVectorBaseType(item.valueType);
+      return base + '32x4(' + makeGetValue(value,  0, base, 0, item.unsigned, 0, item.align) + ',' +
+                              makeGetValue(value,  4, base, 0, item.unsigned, 0, item.align) + ',' +
+                              makeGetValue(value,  8, base, 0, item.unsigned, 0, item.align) + ',' +
+                              makeGetValue(value, 12, base, 0, item.unsigned, 0, item.align) + ')';
+    }
     var impl = item.ident ? getVarImpl(item.funcData, item.ident) : VAR_EMULATED;
     switch (impl) {
       case VAR_NATIVIZED: {
@@ -1350,6 +1369,37 @@ function JSify(data, functionsOnly, givenFunctions) {
       ret += item.ident + ' = [' + makeEmptyStruct(item.type) + '], ';
     }
     return ret + item.ident + '.f' + item.indexes[0][0].text + '=' + finalizeLLVMParameter(item.value) + ', ' + item.ident + ')';
+  }
+  function insertelementHandler(item) {
+    var base = getVectorBaseType(item.type);
+    var ident = ensureVector(item.ident, base);
+    //return ident + '.with' + SIMDLane[finalizeLLVMParameter(item.index)] + '(' + finalizeLLVMParameter(item.value) + ')';
+    return 'SIMD.with' + SIMDLane[finalizeLLVMParameter(item.index)] + '(' + ident + ',' + finalizeLLVMParameter(item.value) + ')';
+  }
+  function extractelementHandler(item) {
+    var base = getVectorBaseType(item.type);
+    var ident = ensureVector(item.ident, base);
+    var index = finalizeLLVMParameter(item.value);
+    assert(isNumber(index));
+    return ident + '.' + simdLane[index];
+  }
+  function shufflevectorHandler(item) {
+    var base = getVectorBaseType(item.type);
+    var first = ensureVector(item.ident, base);
+    var second = ensureVector(finalizeLLVMParameter(item.value), base);
+    var mask;
+    if (item.mask.intertype === 'value') {
+      assert(item.mask.ident === 'zeroinitializer');
+      mask = [0, 0, 0, 0];
+    } else {
+      assert(item.mask.intertype === 'vector');
+      mask = item.mask.idents;
+    }
+    for (var i = 0; i < 4; i++) assert(mask[0] == 0 || mask == 1);
+    i = 0;
+    return base + '32x4(' + mask.map(function(m) {
+      return (m == 1 ? second : first) + '.' + simdLane[i++];
+    }).join(',') + ')';
   }
   function indirectbrHandler(item) {
     var phiSets = calcPhiSets(item);
@@ -1817,6 +1867,9 @@ function JSify(data, functionsOnly, givenFunctions) {
       print('// Warning: printing of i64 values may be slightly rounded! No deep i64 math used, so precise i64 code not included');
       print('var i64Math = null;');
     }
+    if (Types.usesSIMD) {
+      print(read('simd.js'));
+    }
 
     if (CORRUPTION_CHECK) {
       assert(!ASM_JS, 'corruption checker is not compatible with asm.js');
@@ -1866,8 +1919,6 @@ function JSify(data, functionsOnly, givenFunctions) {
     }
 
     PassManager.serialize();
-
-    return null;
   }
 
   // Data
@@ -1897,13 +1948,18 @@ function JSify(data, functionsOnly, givenFunctions) {
       }
     }
 
+    //B.start('jsifier-handle-gv');
     sortGlobals(data.globalVariables).forEach(globalVariableHandler);
+    //B.stop('jsifier-handle-gv');
     data.aliass.forEach(aliasHandler);
     data.functions.forEach(functionSplitter);
   }
 
+  //B.start('jsifier-fc');
   finalCombiner();
+  //B.stop('jsifier-fc');
 
   dprint('framework', 'Big picture: Finishing JSifier, main pass=' + mainPass);
+  //B.stop('jsifier');
 }
 

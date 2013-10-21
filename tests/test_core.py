@@ -7274,6 +7274,7 @@ date: 18.07.2013w; day 18, month  7, year 2013, extra: 201, 3
     self.do_run(src, expected, extra_emscripten_args=['-H', 'libc/langinfo.h'])
 
   def test_files(self):
+    self.banned_js_engines = [SPIDERMONKEY_ENGINE] # closure can generate variables called 'gc', which pick up js shell stuff
     if self.emcc_args is not None and '-O2' in self.emcc_args:
       self.emcc_args += ['--closure', '1'] # Use closure here, to test we don't break FS stuff
       self.emcc_args = filter(lambda x: x != '-g', self.emcc_args) # ensure we test --closure 1 --memory-init-file 1 (-g would disable closure)
@@ -7761,6 +7762,7 @@ def process(filename):
     self.do_run(src, 'success', force_c=True, js_engines=[NODE_JS])
 
   def test_unistd_access(self):
+    self.clear()
     if not self.is_le32(): return self.skip('le32 needed for inline js')
     for fs in ['MEMFS', 'NODEFS']:
       src = open(path_from_root('tests', 'unistd', 'access.c'), 'r').read()
@@ -7799,6 +7801,7 @@ def process(filename):
     self.do_run(src, expected)
 
   def test_unistd_truncate(self):
+    self.clear()
     if not self.is_le32(): return self.skip('le32 needed for inline js')
     for fs in ['MEMFS', 'NODEFS']:
       src = open(path_from_root('tests', 'unistd', 'truncate.c'), 'r').read()
@@ -7826,6 +7829,7 @@ def process(filename):
     self.do_run(src, expected)
 
   def test_unistd_unlink(self):
+    self.clear()
     if self.emcc_args is None: return self.skip('requires emcc')
     if not self.is_le32(): return self.skip('le32 needed for inline js')
     for fs in ['MEMFS', 'NODEFS']:
@@ -7834,6 +7838,7 @@ def process(filename):
       self.do_run(src, 'success', force_c=True, js_engines=[NODE_JS])
 
   def test_unistd_links(self):
+    self.clear()
     if not self.is_le32(): return self.skip('le32 needed for inline js')
     for fs in ['MEMFS', 'NODEFS']:
       src = open(path_from_root('tests', 'unistd', 'links.c'), 'r').read()
@@ -7847,6 +7852,7 @@ def process(filename):
     self.do_run(src, expected)
 
   def test_unistd_io(self):
+    self.clear()
     if not self.is_le32(): return self.skip('le32 needed for inline js')
     if self.run_name == 'o2': return self.skip('non-asm optimized builds can fail with inline js')
     if self.emcc_args is None: return self.skip('requires emcc')
@@ -8091,11 +8097,7 @@ int main(int argc, char **argv) {
 
   def test_iostream(self):
     if Settings.QUANTUM_SIZE == 1: return self.skip("we don't support libcxx in q1")
-
-    if self.emcc_args is None:
-      if Building.LLVM_OPTS: return self.skip('optimizing bitcode before emcc can confuse libcxx inclusion')
-      self.emcc_args = [] # libc++ auto-inclusion is only done if we use emcc
-      Settings.SAFE_HEAP = 0 # Some spurious warnings from libc++ internals
+    if self.emcc_args is None: return self.skip('needs ta2 and emcc')
 
     src = '''
       #include <iostream>

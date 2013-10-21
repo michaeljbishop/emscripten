@@ -25,6 +25,7 @@ var SHADOW_FLIP = { i64: 'double', double: 'i64' }; //, i32: 'float', float: 'i3
 // Analyzer
 
 function analyzer(data, sidePass) {
+  //B.start('analyzer');
   var mainPass = !sidePass;
 
   var item = { items: data };
@@ -966,11 +967,10 @@ function analyzer(data, sidePass) {
       var subType = check[2];
       addTypeInternal(subType); // needed for anonymous structure definitions (see below)
 
-      // Huge structural types are represented very inefficiently, both here and in generated JS. Best to avoid them - for example static char x[10*1024*1024]; is bad, while static char *x = malloc(10*1024*1024) is fine.
-      if (num >= 10*1024*1024) warnOnce('warning: very large fixed-size structural type: ' + type + ' - can you reduce it? (compilation may be slow)');
+      var fields = [subType, subType]; // Two, so we get the flatFactor right. We care about the flatFactor, not the size here. see calculateStructAlignment
       Types.types[nonPointing] = {
         name_: nonPointing,
-        fields: range(num).map(function() { return subType }),
+        fields: fields,
         lineNum: '?'
       };
       newTypes[nonPointing] = 1;
@@ -979,7 +979,7 @@ function analyzer(data, sidePass) {
       if (!Types.types[zerod]) {
         Types.types[zerod] = {
           name_: zerod,
-          fields: [subType, subType], // Two, so we get the flatFactor right. We care about the flatFactor, not the size here
+          fields: fields,
           lineNum: '?'
         };
         newTypes[zerod] = 1;
@@ -993,6 +993,20 @@ function analyzer(data, sidePass) {
       var packed = type[0] == '<';
       var internal = type;
       if (packed) {
+        if (type[1] !== '{') {
+          // vector type, <4 x float> etc.
+          var size = getVectorSize(type);
+          Types.types[type] = {
+            name_: type,
+            fields: zeros(size).map(function() {
+              return getVectorNativeType(type);
+            }),
+            packed: false,
+            flatSize: 4*size,
+            lineNum: '?'
+          };
+          return;
+        }
         if (internal[internal.length-1] != '>') {
           warnOnce('ignoring type ' + internal);
           return; // function pointer or such
@@ -1007,7 +1021,7 @@ function analyzer(data, sidePass) {
       internal = internal.substr(2, internal.length-4);
       Types.types[type] = {
         name_: type,
-        fields: splitTokenList(tokenize(internal).tokens).map(function(segment) {
+        fields: splitTokenList(tokenize(internal)).map(function(segment) {
           return segment[0].text;
         }),
         packed: packed,
@@ -1748,6 +1762,7 @@ function analyzer(data, sidePass) {
   stackAnalyzer();
   relooper();
 
+  //B.stop('analyzer');
   return item;
 }
 
