@@ -11,10 +11,7 @@ data downloads.
 
 Usage:
 
-  file_packager.py TARGET [--preload A [B..]] [--embed C [D..]] [--compress COMPRESSION_DATA] [--pre-run] [--crunch[=X]] [--js-output=OUTPUT.js] [--no-force]
-
-  --pre-run Will generate wrapper code that does preloading in Module.preRun. This is necessary if you add this
-            code before the main file has been loading, which includes necessary components like addRunDependency.
+  file_packager.py TARGET [--preload A [B..]] [--embed C [D..]] [--compress COMPRESSION_DATA] [--crunch[=X]] [--js-output=OUTPUT.js] [--no-force]
 
   --crunch=X Will compress dxt files to crn with quality level X. The crunch commandline tool must be present
              and CRUNCH should be defined in ~/.emscripten that points to it. JS crunch decompressing code will
@@ -46,7 +43,7 @@ from shared import Compression, execute, suffix, unsuffixed
 from subprocess import Popen, PIPE, STDOUT
 
 if len(sys.argv) == 1:
-  print '''Usage: file_packager.py TARGET [--preload A...] [--embed B...] [--compress COMPRESSION_DATA] [--pre-run] [--crunch[=X]] [--js-output=OUTPUT.js] [--no-force] [--use-preload-cache]
+  print '''Usage: file_packager.py TARGET [--preload A...] [--embed B...] [--compress COMPRESSION_DATA] [--crunch[=X]] [--js-output=OUTPUT.js] [--no-force] [--use-preload-cache]
 See the source for more details.'''
   sys.exit(0)
 
@@ -69,7 +66,6 @@ in_preload = False
 in_embed = False
 has_preloaded = False
 in_compress = 0
-pre_run = False
 crunch = 0
 plugins = []
 jsoutput = None
@@ -102,11 +98,6 @@ for arg in sys.argv[1:]:
     in_compress = 1
     in_preload = False
     in_embed = False
-  elif arg == '--pre-run':
-    pre_run = True
-    in_preload = False
-    in_embed = False
-    in_compress = 0
   elif arg == '--no-force':
     force = False
   elif arg == '--use-preload-cache':
@@ -154,6 +145,8 @@ if (not force) and len(data_files) == 0:
   has_preloaded = False
 
 ret = '''
+var Module;
+if (typeof Module === 'undefined') Module = eval('(function() { try { return Module || {} } catch(e) { return {} } })()');
 (function() {
 '''
 
@@ -378,7 +371,7 @@ if has_preloaded:
           if (that.audio) {
             Module['removeRunDependency']('fp ' + that.name); // workaround for chromium bug 124926 (still no audio with this, but at least we don't hang)
           } else {
-            Runtime.warn('Preloading file ' + that.name + ' failed');
+            Module.printErr('Preloading file ' + that.name + ' failed');
           }
         }, false, true); // canOwn this data in the filesystem, it is a slide into the heap that will never change
         this.requests[this.name] = null;
@@ -444,6 +437,7 @@ if has_preloaded:
     ''' % use_data
 
   package_uuid = uuid.uuid4();
+  remote_package_name = os.path.basename(Compression.compressed_name(data_target) if Compression.on else data_target)
   code += r'''
     if (!Module.expectedDataFileDownloads) {
       Module.expectedDataFileDownloads = 0;
@@ -455,7 +449,7 @@ if has_preloaded:
     var PACKAGE_NAME = '%s';
     var REMOTE_PACKAGE_NAME = '%s';
     var PACKAGE_UUID = '%s';
-  ''' % (data_target, os.path.basename(Compression.compressed_name(data_target) if Compression.on else data_target), package_uuid)
+  ''' % (data_target, remote_package_name, package_uuid)
 
   if use_preload_cache:
     code += r'''
@@ -548,7 +542,7 @@ if has_preloaded:
       };
     '''
 
-  code += r'''
+  ret += r'''
     function fetchRemotePackage(packageName, callback, errback) {
       var xhr = new XMLHttpRequest();
       xhr.open('GET', packageName, true);
@@ -576,9 +570,9 @@ if has_preloaded:
             num++;
           }
           total = Math.ceil(total * Module.expectedDataFileDownloads/num);
-          Module['setStatus']('Downloading data... (' + loaded + '/' + total + ')');
+          if (Module['setStatus']) Module['setStatus']('Downloading data... (' + loaded + '/' + total + ')');
         } else if (!Module.dataFileDownloads) {
-          Module['setStatus']('Downloading data...');
+          if (Module['setStatus']) Module['setStatus']('Downloading data...');
         }
       };
       xhr.onload = function(event) {
@@ -588,6 +582,12 @@ if has_preloaded:
       xhr.send(null);
     };
 
+    function handleError(error) {
+      console.error('package error:', error);
+    };
+  '''
+
+  code += r'''
     function processPackageData(arrayBuffer) {
       Module.finishedDataFileDownloads++;
       assert(arrayBuffer, 'Loading data file failed.');
@@ -596,15 +596,10 @@ if has_preloaded:
       %s
     };
     Module['addRunDependency']('datafile_%s');
-
-    function handleError(error) {
-      console.error('package error:', error);
-    };
   ''' % (use_data, data_target) # use basename because from the browser's point of view, we need to find the datafile in the same dir as the html file
 
   code += r'''
-    if (!Module.preloadResults)
-      Module.preloadResults = {};
+    if (!Module.preloadResults) Module.preloadResults = {};
   '''
 
   if use_preload_cache:
@@ -643,21 +638,43 @@ if has_preloaded:
       if (Module['setStatus']) Module['setStatus']('Downloading...');
     '''
   else:
+    # Not using preload cache, so we might as well start the xhr ASAP, potentially before JS parsing of the main codebase if it's after us.
+    # Only tricky bit is the fetch is async, but also when runWithFS is called is async, so we handle both orderings.
+    ret += r'''
+      var fetched = null, fetchedCallback = null;
+      fetchRemotePackage('%s', function(data) {
+        if (fetchedCallback) {
+          fetchedCallback(data);
+          fetchedCallback = null;
+        } else {
+          fetched = data;
+        }
+      }, handleError);
+    ''' % os.path.basename(Compression.compressed_name(data_target) if Compression.on else data_target)
+
     code += r'''
       Module.preloadResults[PACKAGE_NAME] = {fromCache: false};
-      fetchRemotePackage(REMOTE_PACKAGE_NAME, processPackageData, handleError);
+      if (fetched) {
+        processPackageData(fetched);
+        fetched = null;
+      } else {
+        fetchedCallback = processPackageData;
+      }
     '''
 
-if pre_run:
-  ret += '''
-  if (typeof Module == 'undefined') Module = {};
-  if (!Module['preRun']) Module['preRun'] = [];
-  Module["preRun"].push(function() {
+ret += '''
+  function runWithFS() {
 '''
 ret += code
-
-if pre_run:
-  ret += '  });\n'
+ret += '''
+  }
+  if (Module['calledRun']) {
+    runWithFS();
+  } else {
+    if (!Module['preRun']) Module['preRun'] = [];
+    Module["preRun"].push(runWithFS); // FS is not initialized yet, wait for it
+  }
+'''
 
 if crunch:
   ret += '''
