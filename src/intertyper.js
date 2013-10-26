@@ -471,8 +471,8 @@ function intertyper(lines, sidePass, baseLineNums) {
           item.tokens[1] = item.tokens[1].tokens[0];
         }
         var subTokens = item.tokens[1].tokens;
-        if (subTokens) {
-          subTokens.push({text:','});
+        if (subTokens && subTokens.length > 0) {
+          subTokens.push({text:','}); // XXX we should avoid altering tokens like that
           while (subTokens[0]) {
             var stop = 1;
             while ([','].indexOf(subTokens[stop].text) == -1) stop ++;
@@ -672,12 +672,14 @@ function intertyper(lines, sidePass, baseLineNums) {
       assert((item.tokens[5].text.match(/=/g) || []).length <= 1, 'we only support at most 1 exported variable from inline js: ' + item.ident);
       var i = 0;
       var params = [], args = [];
-      splitTokenList(tokensLeft[3].tokens).map(function(element) {
-        var ident = toNiceIdent(element[1].text);
-        var type = element[0].text;
-        params.push('$' + (i++));
-        args.push(ident);
-      });
+      if (tokensLeft[3].tokens) {
+        splitTokenList(tokensLeft[3].tokens).map(function(element) {
+          var ident = toNiceIdent(element[1].text);
+          var type = element[0].text;
+          params.push('$' + (i++));
+          args.push(ident);
+        });
+      }
       if (item.assignTo) item.ident = 'return ' + item.ident;
       item.ident = '(function(' + params + ') { ' + item.ident + ' })(' + args + ');';
       return { forward: null, ret: item, item: item };
