@@ -1005,7 +1005,7 @@ mergeInto(LibraryManager.library, {
       if (!seeking) stream.position += bytesWritten;
       try {
         if (stream.path && FS.trackingDelegate['didWriteToFile']) {
-          FS.trackingDelegate['didWriteToFile'](stream.path);
+          FS.trackingDelegate['didWriteToFile'](stream.node);
         }
       } catch(e) {
         console.log("FS.trackingDelegate['didWriteToFile']('"+path+"') threw an exception: " + e.message);
