@@ -675,9 +675,11 @@ mergeInto(LibraryManager.library, {
         console.log("FS.trackingDelegate['didDeletePath']('"+path+"') threw an exception: " + e.message);
       }
     },
-    readdir: function(path) {
-      var lookup = FS.lookupPath(path, { follow: true });
-      var node = lookup.node;
+    readdir: function(node) {
+      if (typeof node === 'string') {
+        var lookup = FS.lookupPath(node, { follow: true });
+        node = lookup.node;
+      }
       if (!node.node_ops.readdir) {
         throw new FS.ErrnoError(ERRNO_CODES.ENOTDIR);
       }
@@ -725,9 +727,11 @@ mergeInto(LibraryManager.library, {
       }
       return link.node_ops.readlink(link);
     },
-    stat: function(path, dontFollow) {
-      var lookup = FS.lookupPath(path, { follow: !dontFollow });
-      var node = lookup.node;
+    stat: function(node, dontFollow) {
+      if (typeof node === 'string') {
+        var lookup = FS.lookupPath(node, { follow: !dontFollow });
+        node = lookup.node;
+      }
       if (!node.node_ops.getattr) {
         throw new FS.ErrnoError(ERRNO_CODES.EPERM);
       }
@@ -835,7 +839,6 @@ mergeInto(LibraryManager.library, {
       });
     },
     open: function(path, flags, mode, fd_start, fd_end) {
-      path = PATH.normalize(path);
       flags = typeof flags === 'string' ? FS.modeStringToFlags(flags) : flags;
       mode = typeof mode === 'undefined' ? 0666 : mode;
       if ((flags & {{{ cDefine('O_CREAT') }}})) {
@@ -844,13 +847,18 @@ mergeInto(LibraryManager.library, {
         mode = 0;
       }
       var node;
-      try {
-        var lookup = FS.lookupPath(path, {
-          follow: !(flags & {{{ cDefine('O_NOFOLLOW') }}})
-        });
-        node = lookup.node;
-      } catch (e) {
-        // ignore
+      if (typeof path === 'object') {
+        node = path;
+      } else {
+        path = PATH.normalize(path);
+        try {
+          var lookup = FS.lookupPath(path, {
+            follow: !(flags & {{{ cDefine('O_NOFOLLOW') }}})
+          });
+          node = lookup.node;
+        } catch (e) {
+          // ignore
+        }
       }
       // perhaps we need to create the node
       if ((flags & {{{ cDefine('O_CREAT') }}})) {
@@ -884,9 +892,15 @@ mergeInto(LibraryManager.library, {
       flags &= ~({{{ cDefine('O_EXCL') }}} | {{{ cDefine('O_TRUNC') }}});
 
       // register the stream with the filesystem
+      var streamPath;
       var stream = FS.createStream({
         node: node,
-        path: FS.getPath(node),  // we want the absolute path to the node
+        path: function() {
+          if (!streamPath) {
+            streamPath = FS.getPath(node);
+          }
+          return streamPath;
+        },  // we want the absolute path to the node
         flags: flags,
         seekable: true,
         position: 0,
@@ -900,10 +914,12 @@ mergeInto(LibraryManager.library, {
         stream.stream_ops.open(stream);
       }
       if (Module['logReadFiles'] && !(flags & {{{ cDefine('O_WRONLY')}}})) {
+        var nodePath = path;
+        if (typeof nodePath !== 'string') nodePath = stream.path();
         if (!FS.readFiles) FS.readFiles = {};
-        if (!(path in FS.readFiles)) {
-          FS.readFiles[path] = 1;
-          Module['printErr']('read file: ' + path);
+        if (!(nodePath in FS.readFiles)) {
+          FS.readFiles[nodePath] = 1;
+          Module['printErr']('read file: ' + nodePath);
         }
       }
       try {
@@ -1074,12 +1090,15 @@ mergeInto(LibraryManager.library, {
     cwd: function() {
       return FS.currentPath;
     },
-    chdir: function(path) {
-      var lookup = FS.lookupPath(path, { follow: true });
-      if (!FS.isDir(lookup.node.mode)) {
+    chdir: function(node) {
+      if (typeof node === 'string') {
+        var lookup = FS.lookupPath(node, { follow: true });
+        node = lookup.node;
+      }
+      if (!FS.isDir(node.mode)) {
         throw new FS.ErrnoError(ERRNO_CODES.ENOTDIR);
       }
-      var err = FS.nodePermissions(lookup.node, 'x');
+      var err = FS.nodePermissions(node, 'x');
       if (err) {
         throw new FS.ErrnoError(err);
       }
@@ -1292,11 +1311,11 @@ mergeInto(LibraryManager.library, {
           data = arr;
         }
         // make sure we can write to the file
-        FS.chmod(path, mode | {{{ cDefine('S_IWUGO') }}});
-        var stream = FS.open(path, 'w');
+        FS.chmod(node, mode | {{{ cDefine('S_IWUGO') }}});
+        var stream = FS.open(node, 'w');
         FS.write(stream, data, 0, data.length, 0, canOwn);
         FS.close(stream);
-        FS.chmod(path, mode);
+        FS.chmod(node, mode);
       }
       return node;
     },
