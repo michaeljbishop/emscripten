@@ -1102,7 +1102,7 @@ mergeInto(LibraryManager.library, {
       if (err) {
         throw new FS.ErrnoError(err);
       }
-      FS.currentPath = lookup.path;
+      FS.currentPath = FS.getPath(node);
     },
     createDefaultDirectories: function() {
       FS.mkdir('/tmp');
