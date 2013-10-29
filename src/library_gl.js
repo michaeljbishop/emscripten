@@ -4289,6 +4289,10 @@ var LibraryGL = {
     GL.immediate.matrix.lib.mat4.transpose(GL.immediate.matrix[GL.immediate.currentMatrix]);
   },
 
+  glLogicOp: function() {
+    Module.printErr("glLogicOp is unsupported. Ignoring.");
+  },
+
   glMultMatrixd: function(matrix) {
     GL.immediate.matricesModified = true;
     GL.immediate.matrix.lib.mat4.multiply(GL.immediate.matrix[GL.immediate.currentMatrix],
