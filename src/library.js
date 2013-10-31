@@ -8588,7 +8588,7 @@ LibraryManager.library = {
   },
 
   emscripten_run_script_string: function(ptr) {
-    var s = eval(Pointer_stringify(ptr));
+    var s = eval(Pointer_stringify(ptr)) + '';
     var me = _emscripten_run_script_string;
     if (!me.bufferSize || me.bufferSize < s.length+1) {
       if (me.bufferSize) _free(me.buffer);
@@ -8628,6 +8628,14 @@ LibraryManager.library = {
     if (func) return func();
     func = Runtime.asmConstCache[code] = eval('(function(){ ' + Pointer_stringify(code) + ' })'); // new Function does not allow upvars in node
     return func();
+  },
+
+  //============================
+  // emscripten vector ops
+  //============================
+
+  emscripten_float32x4_signmask__inline: function(x) {
+    return x + '.signMask()';
   },
 
   //============================

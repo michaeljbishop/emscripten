@@ -157,6 +157,10 @@ function isStructType(type) {
   return type[0] == '%';
 }
 
+function isVectorType(type) {
+  return type[type.length-1] === '>';
+}
+
 function isStructuralType(type) {
   return /^{ ?[^}]* ?}$/.test(type); // { i32, i8 } etc. - anonymous struct types
 }
@@ -215,8 +219,22 @@ function isIdenticallyImplemented(type1, type2) {
 }
 
 function isIllegalType(type) {
-  var bits = getBits(type);
-  return bits > 0 && (bits >= 64 || !isPowerOfTwo(bits));
+  switch (type) {
+    case 'i1':
+    case 'i8':
+    case 'i16':
+    case 'i32':
+    case 'float':
+    case 'double':
+    case 'rawJS':
+    case '<2 x float>':
+    case '<4 x float>':
+    case '<2 x i32>':
+    case '<4 x i32>':
+    case 'void': return false;
+  }
+  if (!type || type[type.length-1] === '*') return false;
+  return true;
 }
 
 function isVoidType(type) {
@@ -287,6 +305,9 @@ function getReturnType(type) {
   if (pointingLevels(type) > 1) return '*'; // the type of a call can be either the return value, or the entire function. ** or more means it is a return value
   var lastOpen = type.lastIndexOf('(');
   if (lastOpen > 0) {
+    // handle things like   void (i32)* (i32, void (i32)*)*
+    var closeStar = type.indexOf(')*');
+    if (closeStar > 0 && closeStar < type.length-2) lastOpen = closeStar+3;
     return type.substr(0, lastOpen-1);
   }
   return type;
@@ -466,26 +487,13 @@ function parseParamTokens(params) {
         Types.needAnalysis[ret[ret.length-1].type] = 0;
         anonymousIndex ++;
       }
-    } else if (segment[1].text in PARSABLE_LLVM_FUNCTIONS) {
-      ret.push(parseLLVMFunctionCall(segment));
-    } else if (segment[1].text === 'blockaddress') {
-      ret.push(parseBlockAddress(segment));
-    } else if (segment[1].type && segment[1].type == '{') {
-      ret.push(parseLLVMSegment(segment));
     } else {
       if (segment[2] && segment[2].text == 'to') { // part of bitcast params
         segment = segment.slice(0, 2);
       }
-      while (segment.length > 2) {
-        segment[0].text += segment[1].text;
-        segment.splice(1, 1); // TODO: merge tokens nicely
-      }
-      ret.push({
-        intertype: 'value',
-        type: segment[0].text,
-        ident: toNiceIdent(parseNumerical(segment[1].text, segment[0].text))
-      });
-      Types.needAnalysis[removeAllPointing(ret[ret.length-1].type)] = 0;
+      var parsed = parseLLVMSegment(segment);
+      if (parsed.intertype === 'value' && !isIllegalType(parsed.type)) parsed.ident = parseNumerical(parsed.ident, parsed.type);
+      ret.push(parsed);
     }
     ret[ret.length-1].byVal = byVal;
   }
@@ -557,25 +565,6 @@ function sortGlobals(globals) {
     return (Number(isBSS(a)) - Number(isBSS(b))) ||
       (inv[b.ident] - inv[a.ident]);
   });
-}
-
-function finalizeParam(param) {
-  if (param.intertype in PARSABLE_LLVM_FUNCTIONS) {
-    return finalizeLLVMFunctionCall(param);
-  } else if (param.intertype === 'blockaddress') {
-    return finalizeBlockAddress(param);
-  } else if (param.intertype === 'jsvalue') {
-    return param.ident;
-  } else {
-    if (param.type == 'i64' && USE_TYPED_ARRAYS == 2) {
-      return parseI64Constant(param.ident);
-    }
-    var ret = toNiceIdent(param.ident);
-    if (ret in Variables.globals) {
-      ret = makeGlobalUse(ret);
-    }
-    return ret;
-  }
 }
 
 // Segment ==> Parameter
@@ -2001,6 +1990,8 @@ function finalizeLLVMParameter(param, noIndexizeFunctions) {
   } else if (param.ident == 'zeroinitializer') {
     if (isStructType(param.type)) {
       return makeLLVMStruct(zeros(Types.types[param.type].fields.length));
+    } else if (isVectorType(param.type)) {
+      return ensureVector(0, getVectorBaseType(param.type));
     } else {
       return '0';
     }
@@ -2023,7 +2014,7 @@ function finalizeLLVMParameter(param, noIndexizeFunctions) {
   } else if (param.intertype == 'mathop') {
     return processMathop(param);
   } else if (param.intertype === 'vector') {
-    return 'float32x4(' + param.idents.join(',') + ')';
+    return getVectorBaseType(param.type) + '32x4(' + param.idents.join(',') + ')';
   } else {
     throw 'invalid llvm parameter: ' + param.intertype;
   }
