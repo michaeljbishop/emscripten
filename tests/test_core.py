@@ -3814,7 +3814,6 @@ def process(filename):
       self.do_run(open(path_from_root('tests', 'emscripten_get_now.cpp')).read(), 'Timer resolution is good.')
 
   def test_inlinejs(self):
-      if Settings.ASM_JS: Settings.ASM_JS = 2 # skip validation, asm does not support random code
       if not self.is_le32(): return self.skip('le32 needed for inline js')
       src = r'''
         #include <stdio.h>
@@ -3842,7 +3841,6 @@ def process(filename):
       self.do_run(src, 'Inline JS is very cool\n3.64\n') # TODO 1\n2\n3\n1\n2\n3\n')
 
   def test_inlinejs2(self):
-      if Settings.ASM_JS: Settings.ASM_JS = 2 # skip validation, asm does not support random code
       if not self.is_le32(): return self.skip('le32 needed for inline js')
       src = r'''
         #include <stdio.h>
@@ -8594,30 +8592,13 @@ void*:16
 
   def test_mmap_file(self):
     if self.emcc_args is None: return self.skip('requires emcc')
-    self.emcc_args += ['--embed-file', 'data.dat']
+    for extra_args in [[], ['--no-heap-copy']]:
+      self.emcc_args += ['--embed-file', 'data.dat'] + extra_args
 
-    open(self.in_dir('data.dat'), 'w').write('data from the file ' + ('.' * 9000))
+      open(self.in_dir('data.dat'), 'w').write('data from the file ' + ('.' * 9000))
 
-    src = r'''
-      #include <stdio.h>
-      #include <sys/mman.h>
-
-      int main() {
-        printf("*\n");
-        FILE *f = fopen("data.dat", "r");
-        char *m;
-        m = (char*)mmap(NULL, 9000, PROT_READ, MAP_PRIVATE, fileno(f), 0);
-        for (int i = 0; i < 20; i++) putchar(m[i]);
-        munmap(m, 9000);
-        printf("\n");
-        m = (char*)mmap(NULL, 9000, PROT_READ, MAP_PRIVATE, fileno(f), 5);
-        for (int i = 0; i < 20; i++) putchar(m[i]);
-        munmap(m, 9000);
-        printf("\n*\n");
-        return 0;
-      }
-    '''
-    self.do_run(src, '*\ndata from the file .\nfrom the file ......\n*\n')
+      src = open(path_from_root('tests', 'mmap_file.c')).read()
+      self.do_run(src, '*\ndata from the file .\nfrom the file ......\n*\n')
 
   def test_cubescript(self):
     if self.emcc_args is None: return self.skip('requires emcc')
@@ -8682,7 +8663,7 @@ _mm_setzero_ps(void)
 
 int main(int argc, char **argv) {
   float data[8];
-  for (int i = 0; i < 32; i++) data[i] = (1+i+argc)*(2+i+argc*argc);
+  for (int i = 0; i < 32; i++) data[i] = (1+i+argc)*(2+i+argc*argc); // confuse optimizer
   {
     float32x4 *a = (float32x4*)&data[0];
     float32x4 *b = (float32x4*)&data[4];
@@ -8707,6 +8688,11 @@ int main(int argc, char **argv) {
     e = c+d;
     f = c-d;
     printf("5uints! %d, %d, %d, %d   %d, %d, %d, %d\n", e[0], e[1], e[2], e[3], f[0], f[1], f[2], f[3]);
+    e = c&d;
+    f = c|d;
+    e = ~c&d;
+    f = c^d;
+    printf("5uintops! %d, %d, %d, %d   %d, %d, %d, %d\n", e[0], e[1], e[2], e[3], f[0], f[1], f[2], f[3]);
   }
   {
     float32x4 c, d, e, f;
@@ -8726,6 +8712,7 @@ int main(int argc, char **argv) {
 zeros 0, 0, 0, 0
 4uints! 1086324736, 1094713344, 1101004800, 1106247680   1109917696, 1113587712, 1116733440, 1119092736
 5uints! -2098724864, -2086666240, -2077229056, -2069626880   -23592960, -18874368, -15728640, -12845056
+5uintops! 36175872, 35651584, 34603008, 33816576   48758784, 52428800, 53477376, 54788096
 6floats! -9, 0, 4, 9   -2, -12, 14, 10
 ''')
 
