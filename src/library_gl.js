@@ -4400,6 +4400,9 @@ var LibraryGL = {
   glTexEnvf: function() { Runtime.warnOnce('glTexEnvf: TODO') },
   glTexEnvfv: function() { Runtime.warnOnce('glTexEnvfv: TODO') },
 
+  glGetTexEnviv: function() { Runtime.warnOnce('glGetTexEnviv: TODO') },
+  glGetTexEnvfv: function() { Runtime.warnOnce('glGetTexEnvfv: TODO') },
+
   glTexImage1D: function() { throw 'glTexImage1D: TODO' },
   glTexCoord3f: function() { throw 'glTexCoord3f: TODO' },
   glGetTexLevelParameteriv: function() { throw 'glGetTexLevelParameteriv: TODO' },
