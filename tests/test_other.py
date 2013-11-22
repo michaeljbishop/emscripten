@@ -1,9 +1,15 @@
 import multiprocessing, os, re, shutil, subprocess, sys
 import tools.shared
 from tools.shared import *
-from runner import RunnerCore, path_from_root
+from runner import RunnerCore, path_from_root, get_bullet_library
 
 class other(RunnerCore):
+  def get_zlib_library(self):
+    if WINDOWS:
+      return self.get_library('zlib', os.path.join('libz.a'), configure=['emconfigure.bat'], configure_args=['cmake', '.', '-DBUILD_SHARED_LIBS=OFF'], make=['mingw32-make'], make_args=[])
+    else:
+      return self.get_library('zlib', os.path.join('libz.a'), make_args=['libz.a'])
+    
   def test_emcc(self):
     for compiler in [EMCC, EMXX]:
       shortcompiler = os.path.basename(compiler)
@@ -169,7 +175,7 @@ Options that are modified or new in %s include:
           if keep_debug:
             assert ('(label)' in generated or '(label | 0)' in generated) == (opt_level <= 0), 'relooping should be in opt >= 1'
             assert ('assert(STACKTOP < STACK_MAX' in generated) == (opt_level == 0), 'assertions should be in opt == 0'
-            assert 'var $i;' in generated or 'var $i_0' in generated or 'var $storemerge3;' in generated or 'var $storemerge4;' in generated or '$i_04' in generated or '$i_05' in generated or 'var $original = 0' in generated, 'micro opts should always be on'
+            assert '$i' in generated or '$storemerge' in generated or '$original' in generated, 'micro opts should always be on'
           if opt_level >= 2 and '-g' in params:
             assert re.search('HEAP8\[\$?\w+ ?\+ ?\(+\$?\w+ ?', generated) or re.search('HEAP8\[HEAP32\[', generated), 'eliminator should create compound expressions, and fewer one-time vars' # also in -O1, but easier to test in -O2
           assert ('_puts(' in generated) == (opt_level >= 1), 'with opt >= 1, llvm opts are run and they should optimize printf to puts'
@@ -680,6 +686,38 @@ f.close()
       }
     ''', ['hello through side\n'])
 
+    # js library call
+    open('lib.js', 'w').write(r'''
+      mergeInto(LibraryManager.library, {
+        test_lib_func: function(x) {
+          return x + 17.2;
+        }
+      });
+    ''')
+    test('js-lib', 'extern "C" { extern double test_lib_func(int input); }', r'''
+      #include <stdio.h>
+      #include "header.h"
+      extern double sidey();
+      int main2() { return 11; }
+      int main() {
+        int input = sidey();
+        double temp = test_lib_func(input);
+        printf("other says %.2f\n", temp);
+        printf("more: %.5f, %d\n", temp, input);
+        return 0;
+      }
+    ''', r'''
+      #include <stdio.h>
+      #include "header.h"
+      extern int main2();
+      double sidey() {
+        int temp = main2();
+        printf("main2 sed: %d\n", temp);
+        printf("main2 sed: %u, %c\n", temp, temp/2);
+        return test_lib_func(temp);
+      }
+    ''', 'other says 45.2', ['--js-library', 'lib.js'])
+
     # libc usage in one modules. must force libc inclusion in the main module if that isn't the one using mallinfo()
     try:
       os.environ['EMCC_FORCE_STDLIBS'] = 'libc'
@@ -740,20 +778,20 @@ f.close()
 
     # zlib compression library. tests function pointers in initializers and many other things
     test('zlib', '', open(path_from_root('tests', 'zlib', 'example.c'), 'r').read(), 
-                     self.get_library('zlib', os.path.join('libz.a'), make_args=['libz.a']),
+                     self.get_zlib_library(),
                      open(path_from_root('tests', 'zlib', 'ref.txt'), 'r').read(),
                      args=['-I' + path_from_root('tests', 'zlib')], suffix='c')
 
+    use_cmake = WINDOWS
+    bullet_library = get_bullet_library(self, use_cmake)
+
     # bullet physics engine. tests all the things
     test('bullet', '', open(path_from_root('tests', 'bullet', 'Demos', 'HelloWorld', 'HelloWorld.cpp'), 'r').read(), 
-         self.get_library('bullet', [os.path.join('src', '.libs', 'libBulletDynamics.a'),
-                                     os.path.join('src', '.libs', 'libBulletCollision.a'),
-                                     os.path.join('src', '.libs', 'libLinearMath.a')]),
+         bullet_library,
          [open(path_from_root('tests', 'bullet', 'output.txt'), 'r').read(), # different roundings
           open(path_from_root('tests', 'bullet', 'output2.txt'), 'r').read(),
           open(path_from_root('tests', 'bullet', 'output3.txt'), 'r').read()],
          args=['-I' + path_from_root('tests', 'bullet', 'src')])
-
 
   def test_outline(self):
     def test(name, src, libs, expected, expected_ranges, args=[], suffix='cpp'):
@@ -820,7 +858,7 @@ f.close()
     ]:
       Building.COMPILER_TEST_OPTS = test_opts
       test('zlib', path_from_root('tests', 'zlib', 'example.c'), 
-                   self.get_library('zlib', os.path.join('libz.a'), make_args=['libz.a']),
+                   self.get_zlib_library(),
                    open(path_from_root('tests', 'zlib', 'ref.txt'), 'r').read(),
                    expected_ranges,
                    args=['-I' + path_from_root('tests', 'zlib')], suffix='c')
@@ -1440,10 +1478,12 @@ f.close()
 
       extern "C" {
         void something();
+        void elsey();
       }
 
       int main() {
         something();
+        elsey();
         return 0;
       }
     ''')
@@ -1451,26 +1491,24 @@ f.close()
     def clear(): try_delete('a.out.js')
 
     for args in [[], ['-O2']]:
-      clear()
-      print 'warn', args
-      output = Popen([PYTHON, EMCC, os.path.join(self.get_dir(), 'main.cpp'), '-s', 'WARN_ON_UNDEFINED_SYMBOLS=1'] + args, stderr=PIPE).communicate()
-      self.assertContained('unresolved symbol: something', output[1])
-
-      clear()
-      output = Popen([PYTHON, EMCC, os.path.join(self.get_dir(), 'main.cpp')] + args, stderr=PIPE).communicate()
-      self.assertNotContained('unresolved symbol: something\n', output[1])
-
-    for args in [[], ['-O2']]:
-      clear()
-      print 'error', args
-      output = Popen([PYTHON, EMCC, os.path.join(self.get_dir(), 'main.cpp'), '-s', 'ERROR_ON_UNDEFINED_SYMBOLS=1'] + args, stderr=PIPE).communicate()
-      self.assertContained('unresolved symbol: something', output[1])
-      assert not os.path.exists('a.out.js')
-
-      clear()
-      output = Popen([PYTHON, EMCC, os.path.join(self.get_dir(), 'main.cpp')] + args, stderr=PIPE).communicate()
-      self.assertNotContained('unresolved symbol: something\n', output[1])
-      assert os.path.exists('a.out.js')
+      for action in ['WARN', 'ERROR', None]:
+        for value in ([0, 1] if action else [0]):
+          clear()
+          print 'warn', args, action, value
+          extra = ['-s', action + '_ON_UNDEFINED_SYMBOLS=%d' % value] if action else []
+          output = Popen([PYTHON, EMCC, os.path.join(self.get_dir(), 'main.cpp')] + extra + args, stderr=PIPE).communicate()
+          if action == None or (action == 'WARN' and value):
+            self.assertContained('unresolved symbol: something', output[1])
+            self.assertContained('unresolved symbol: elsey', output[1])
+            assert os.path.exists('a.out.js')
+          elif action == 'ERROR' and value:
+            self.assertContained('unresolved symbol: something', output[1])
+            self.assertContained('unresolved symbol: elsey', output[1])
+            self.assertNotContained('warning', output[1])
+            assert not os.path.exists('a.out.js')
+          elif action == 'WARN' and not value:
+            self.assertNotContained('unresolved symbol', output[1])
+            assert os.path.exists('a.out.js')
 
   def test_toobig(self):
     # very large [N x i8], we should not oom in the compiler
@@ -1909,7 +1947,12 @@ done.
 
     out, err = Popen([PYTHON, EMCC, path_from_root('tests', 'hello_world.c'), '-E'], stdout=PIPE).communicate()
     assert not os.path.exists('a.out.js')
-    assert '''tests/hello_world.c"''' in out
+    # Test explicitly that the output contains a line typically written by the preprocessor.
+    # Clang outputs on Windows lines like "#line 1", on Unix '# 1 '.
+    # TODO: This is one more of those platform-specific discrepancies, investigate more if this ever becomes an issue,
+    # ideally we would have emcc output identical data on all platforms.
+    assert '''#line 1 ''' in out or '''# 1 ''' in out
+    assert '''hello_world.c"''' in out
     assert '''printf("hello, world!''' in out
 
   def test_demangle(self):
@@ -1927,6 +1970,7 @@ done.
         EM_ASM(Module.print(demangle('_main')));
         EM_ASM(Module.print(demangle('__Z2f2v')));
         EM_ASM(Module.print(demangle('__Z12abcdabcdabcdi')));
+        EM_ASM(Module.print(demangle('__ZL12abcdabcdabcdi')));
         EM_ASM(Module.print(demangle('__Z4testcsifdPvPiPc')));
         EM_ASM(Module.print(demangle('__ZN4test5moarrEcslfdPvPiPc')));
         EM_ASM(Module.print(demangle('__ZN4Waka1f12a234123412345pointEv')));
@@ -1937,6 +1981,7 @@ done.
         EM_ASM(Module.print(demangle('__Z9parsewordRPKciRi')));
         EM_ASM(Module.print(demangle('__Z5multiwahtjmxyz')));
         EM_ASM(Module.print(demangle('__Z1aA32_iPA5_c')));
+        EM_ASM(Module.print(demangle('__ZN21FWakaGLXFleeflsMarfooC2EjjjPKvbjj')));
         one(17);
         return 0;
       }
@@ -1944,8 +1989,10 @@ done.
 
     Popen([PYTHON, EMCC, 'src.cpp', '-s', 'LINKABLE=1']).communicate()
     output = run_js('a.out.js')
-    self.assertContained('''main
+    self.assertContained('''operator new()
+_main
 f2()
+abcdabcdabcd(int)
 abcdabcdabcd(int)
 test(char, short, int, float, double, void*, int*, char*)
 test::moarr(char, short, long, float, double, void*, int*, char*)
@@ -1957,6 +2004,7 @@ __cxxabiv1::__si_class_type_info::search_below_dst(__cxxabiv1::__dynamic_cast_in
 parseword(char*&, int, int&)
 multi(wchar_t, signed char, unsigned char, unsigned short, unsigned int, unsigned long, long long, unsigned long long, ...)
 a(int [32], char [5]*)
+FWakaGLXFleeflsMarfoo::FWakaGLXFleeflsMarfoo(unsigned int, unsigned int, unsigned int, void*, bool, unsigned int, unsigned int)
 ''', output)
     # test for multiple functions in one stack trace
     assert 'one(int)' in output
@@ -2011,7 +2059,7 @@ a(int [32], char [5]*)
     try_delete(path_from_root('tests', 'Module-exports', 'test.js.map'))
 
   def test_fs_stream_proto(self):
-    open('src.cpp', 'w').write(r'''
+    open('src.cpp', 'wb').write(r'''
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -2057,4 +2105,28 @@ int main()
     self.clear()
     Popen([PYTHON, EMCC, path_from_root('tests', 'linpack.c'), '-O2', '-DSP', '--llvm-opts', '''['-O3', '-vectorize', '-vectorize-loops', '-bb-vectorize-vector-bits=128', '-force-vector-width=4']''']).communicate()
     self.assertContained('Unrolled Single  Precision', run_js('a.out.js'))
+
+  def test_dependency_file(self):
+    # Issue 1732: -MMD (and friends) create dependency files that need to be
+    # copied from the temporary directory.
+
+    open(os.path.join(self.get_dir(), 'test.cpp'), 'w').write(r'''
+      #include "test.hpp"
+
+      void my_function()
+      {
+      }
+    ''')
+    open(os.path.join(self.get_dir(), 'test.hpp'), 'w').write(r'''
+      void my_function();
+    ''')
+
+    Popen([PYTHON, EMCC, '-MMD', '-c', os.path.join(self.get_dir(), 'test.cpp'), '-o',
+      os.path.join(self.get_dir(), 'test.o')]).communicate()
+
+    assert os.path.exists(os.path.join(self.get_dir(), 'test.d')), 'No dependency file generated'
+    deps = open(os.path.join(self.get_dir(), 'test.d')).read()
+    head, tail = deps.split( ':', 2 )
+    assert 'test.o' in head, 'Invalid dependency target'
+    assert 'test.cpp' in tail and 'test.hpp' in tail, 'Invalid dependencies generated'
 

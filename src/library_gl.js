@@ -11,6 +11,7 @@ var LibraryGL = {
 #endif
 
     counter: 1, // 0 is reserved as 'null' in gl
+    lastError: 0,
     buffers: [],
     programs: [],
     framebuffers: [],
@@ -40,7 +41,11 @@ var LibraryGL = {
       8  // GL_DOUBLE
     ],
 
-    uniformTable: {}, // name => uniform ID. the uID must be identical until relinking, cannot create a new uID each call to glGetUniformLocation
+    programInfos: {}, // Stores additional information needed for each shader program. Each entry is of form:
+    /* { uniforms: {}, // Maps ints back to the opaque WebGLUniformLocation objects.
+         maxUniformLength: int, // Cached in order to implement glGetProgramiv(GL_ACTIVE_UNIFORM_MAX_LENGTH)
+         maxAttributeLength: int // Cached in order to implement glGetProgramiv(GL_ACTIVE_ATTRIBUTE_MAX_LENGTH)
+       } */
 
     stringCache: {},
 
@@ -51,6 +56,13 @@ var LibraryGL = {
       Browser.moduleContextCreatedCallbacks.push(GL.initExtensions);
     },
 
+    // Records a GL error condition that occurred, stored until user calls glGetError() to fetch it. As per GLES2 spec, only the first error 
+    // is remembered, and subsequent errors are discarded until the user has cleared the stored error by a call to glGetError().
+    recordError: function recordError(errorCode) {
+      if (!GL.lastError) {
+        GL.lastError = errorCode;
+      }
+    },
     // Get a new ID for a texture/buffer/etc., while keeping the table dense and fast. Creation is farely rare so it is worth optimizing lookups later.
     getNewId: function(table) {
       var ret = GL.counter++;
@@ -277,7 +289,7 @@ var LibraryGL = {
     },
 
 #if FULL_ES2
-    calcBufLength: function(size, type, stride, count) {
+    calcBufLength: function calcBufLength(size, type, stride, count) {
       if (stride > 0) {
         return count * stride;  // XXXvlad this is not exactly correct I don't think
       }
@@ -287,7 +299,7 @@ var LibraryGL = {
 
     usedTempBuffers: [],
 
-    preDrawHandleClientVertexAttribBindings: function(count) {
+    preDrawHandleClientVertexAttribBindings: function preDrawHandleClientVertexAttribBindings(count) {
       GL.resetBufferBinding = false;
 
       var used = GL.usedTempBuffers;
@@ -321,7 +333,7 @@ var LibraryGL = {
       }
     },
 
-    postDrawHandleClientVertexAttribBindings: function() {
+    postDrawHandleClientVertexAttribBindings: function postDrawHandleClientVertexAttribBindings() {
       if (GL.resetBufferBinding) {
         Module.ctx.bindBuffer(Module.ctx.ARRAY_BUFFER, GL.buffers[GL.currArrayBuffer]);
       }
@@ -455,15 +467,23 @@ var LibraryGL = {
       GL.validateGLObjectID(GL.programs, program, 'populateUniformTable', 'program');
 #endif
       var p = GL.programs[program];
-      GL.uniformTable[program] = {};
-      var ptable = GL.uniformTable[program];
-      // A program's uniformTable maps the string name of an uniform to an integer location of that uniform.
+      GL.programInfos[program] = {
+        uniforms: {},
+        maxUniformLength: 0, // This is eagerly computed below, since we already enumerate all uniforms anyway.
+        maxAttributeLength: -1 // This is lazily computed and cached, computed when/if first asked, "-1" meaning not computed yet.
+      };
+
+      var ptable = GL.programInfos[program];
+      var utable = ptable.uniforms;
+      // A program's uniform table maps the string name of an uniform to an integer location of that uniform.
       // The global GL.uniforms map maps integer locations to WebGLUniformLocations.
       var numUniforms = Module.ctx.getProgramParameter(p, Module.ctx.ACTIVE_UNIFORMS);
       for (var i = 0; i < numUniforms; ++i) {
         var u = Module.ctx.getActiveUniform(p, i);
 
         var name = u.name;
+        ptable.maxUniformLength = Math.max(ptable.maxUniformLength, name.length+1);
+
         // Strip off any trailing array specifier we might have got, e.g. "[0]".
         if (name.indexOf(']', name.length-1) !== -1) {
           var ls = name.lastIndexOf('[');
@@ -471,11 +491,11 @@ var LibraryGL = {
         }
 
         // Optimize memory usage slightly: If we have an array of uniforms, e.g. 'vec3 colors[3];', then 
-        // only store the string 'colors' in ptable, and 'colors[0]', 'colors[1]' and 'colors[2]' will be parsed as 'colors'+i.
+        // only store the string 'colors' in utable, and 'colors[0]', 'colors[1]' and 'colors[2]' will be parsed as 'colors'+i.
         // Note that for the GL.uniforms table, we still need to fetch the all WebGLUniformLocations for all the indices.
         var loc = Module.ctx.getUniformLocation(p, name);
         var id = GL.getNewId(GL.uniforms);
-        ptable[name] = [u.size, id];
+        utable[name] = [u.size, id];
         GL.uniforms[id] = loc;
 
         for (var j = 1; j < u.size; ++j) {
@@ -522,7 +542,11 @@ var LibraryGL = {
         ret = allocate(intArrayFromString('OpenGL ES GLSL 1.00 (WebGL)'), 'i8', ALLOC_NORMAL);
         break;
       default:
-        throw 'Failure: Invalid glGetString value: ' + name_;
+        GL.recordError(0x0500/*GL_INVALID_ENUM*/);
+#if GL_ASSERTIONS
+        Module.printErr('GL_INVALID_ENUM in glGetString: Unknown parameter ' + name_ + '!');
+#endif
+        return 0;
     }
     GL.stringCache[name_] = ret;
     return ret;
@@ -534,6 +558,7 @@ var LibraryGL = {
       case 0x8DFA: // GL_SHADER_COMPILER
         {{{ makeSetValue('p', '0', '1', 'i32') }}};
         return;
+      case 0x8DF8: // GL_SHADER_BINARY_FORMATS
       case 0x8DF9: // GL_NUM_SHADER_BINARY_FORMATS
         {{{ makeSetValue('p', '0', '0', 'i32') }}};
         return;
@@ -553,7 +578,11 @@ var LibraryGL = {
         {{{ makeSetValue('p', '0', 'result ? 1 : 0', 'i8') }}};
         break;
       case "string":
-        throw 'Native code calling glGetIntegerv(' + name_ + ') on a name which returns a string!';
+        GL.recordError(0x0500/*GL_INVALID_ENUM*/);
+#if GL_ASSERTIONS
+        Module.printErr('GL_INVALID_ENUM in glGetIntegerv: Native code calling glGetIntegerv(' + name_ + ') on a name which returns a string!');
+#endif
+        return;
       case "object":
         if (result === null) {
           {{{ makeSetValue('p', '0', '0', 'i32') }}};
@@ -575,18 +604,45 @@ var LibraryGL = {
         } else if (result instanceof WebGLTexture) {
           {{{ makeSetValue('p', '0', 'result.name | 0', 'i32') }}};
         } else {
-          throw 'Unknown object returned from WebGL getParameter';
+          GL.recordError(0x0500/*GL_INVALID_ENUM*/);
+#if GL_ASSERTIONS
+          Module.printErr('GL_INVALID_ENUM in glGetIntegerv: Unknown object returned from WebGL getParameter(' + name_ + ')!');
+#endif
+          return;
         }
         break;
-      case "undefined":
-        throw 'Native code calling glGetIntegerv(' + name_ + ') and it returns undefined';
       default:
-        throw 'Why did we hit the default case?';
+        GL.recordError(0x0500/*GL_INVALID_ENUM*/);
+#if GL_ASSERTIONS
+        Module.printErr('GL_INVALID_ENUM in glGetIntegerv: Native code calling glGetIntegerv(' + name_ + ') and it returns ' + result + ' of type ' + typeof(result) + '!');
+#endif
+        return;
     }
   },
 
   glGetFloatv__sig: 'vii',
   glGetFloatv: function(name_, p) {
+    switch(name_) {
+      case 0x8DFA: // GL_SHADER_COMPILER
+        {{{ makeSetValue('p', '0', '1', 'float') }}};
+        return;
+      case 0x8DF8: // GL_SHADER_BINARY_FORMATS
+        GL.recordError(0x0500/*GL_INVALID_ENUM*/);
+#if GL_ASSERTIONS
+        Module.printErr('GL_INVALID_ENUM in glGetFloatv(GL_SHADER_BINARY_FORMATS): Invalid parameter type!');
+#endif
+        return;
+      case 0x8DF9: // GL_NUM_SHADER_BINARY_FORMATS
+        {{{ makeSetValue('p', '0', '0', 'float') }}};
+        return;
+      case 0x86A2: // GL_NUM_COMPRESSED_TEXTURE_FORMATS
+        // WebGL doesn't have GL_NUM_COMPRESSED_TEXTURE_FORMATS (it's obsolete since GL_COMPRESSED_TEXTURE_FORMATS returns a JS array that can be queried for length),
+        // so implement it ourselves to allow C++ GLES2 code get the length.
+        var formats = Module.ctx.getParameter(0x86A3 /*GL_COMPRESSED_TEXTURE_FORMATS*/);
+        {{{ makeSetValue('p', '0', 'formats.length', 'float') }}};
+        return;
+    }
+    
     var result = Module.ctx.getParameter(name_);
     switch (typeof(result)) {
       case "number":
@@ -599,7 +655,11 @@ var LibraryGL = {
           {{{ makeSetValue('p', '0', '0', 'float') }}};
       case "object":
         if (result === null) {
-          throw 'Native code calling glGetFloatv(' + name_ + ') and it returns null';
+          GL.recordError(0x0500/*GL_INVALID_ENUM*/);
+#if GL_ASSERTIONS
+          Module.printErr('GL_INVALID_ENUM in glGetFloatv: Native code calling glGetFloatv(' + name_ + ') and it returns null!');
+#endif
+          return;
         } else if (result instanceof Float32Array ||
                    result instanceof Uint32Array ||
                    result instanceof Int32Array ||
@@ -618,18 +678,45 @@ var LibraryGL = {
         } else if (result instanceof WebGLTexture) {
           {{{ makeSetValue('p', '0', 'result.name | 0', 'float') }}};
         } else {
-          throw 'Unknown object returned from WebGL getParameter';
+          GL.recordError(0x0500/*GL_INVALID_ENUM*/);
+#if GL_ASSERTIONS
+          Module.printErr('GL_INVALID_ENUM in glGetFloatv: Native code calling glGetFloatv(' + name_ + ') and it returns ' + result + ' of type ' + typeof(result) + '!');
+#endif
+          return;
         }
         break;
-      case "undefined":
-        throw 'Native code calling glGetFloatv(' + name_ + ') and it returns undefined';
       default:
-        throw 'Why did we hit the default case?';
+        GL.recordError(0x0500/*GL_INVALID_ENUM*/);
+#if GL_ASSERTIONS
+        Module.printErr('GL_INVALID_ENUM in glGetFloatv: Native code calling glGetFloatv(' + name_ + ') and it returns ' + result + ' of type ' + typeof(result) + '!');
+#endif
+        return;
     }
   },
 
   glGetBooleanv__sig: 'vii',
   glGetBooleanv: function(name_, p) {
+    switch(name_) {
+      case 0x8DFA: // GL_SHADER_COMPILER
+        {{{ makeSetValue('p', '0', '1', 'i8') }}};
+        return;
+      case 0x8DF8: // GL_SHADER_BINARY_FORMATS
+        GL.recordError(0x0500/*GL_INVALID_ENUM*/);
+#if GL_ASSERTIONS
+        Module.printErr('GL_INVALID_ENUM in glGetBooleanv(GL_SHADER_BINARY_FORMATS): Invalid parameter type!');
+#endif
+        return;
+      case 0x8DF9: // GL_NUM_SHADER_BINARY_FORMATS
+        {{{ makeSetValue('p', '0', '0', 'i8') }}};
+        return;
+      case 0x86A2: // GL_NUM_COMPRESSED_TEXTURE_FORMATS
+        // WebGL doesn't have GL_NUM_COMPRESSED_TEXTURE_FORMATS (it's obsolete since GL_COMPRESSED_TEXTURE_FORMATS returns a JS array that can be queried for length),
+        // so implement it ourselves to allow C++ GLES2 code get the length.
+        var hasCompressedFormats = Module.ctx.getParameter(0x86A3 /*GL_COMPRESSED_TEXTURE_FORMATS*/).length > 0 ? 1 : 0;
+        {{{ makeSetValue('p', '0', 'hasCompressedFormats', 'i8') }}};
+        return;
+    }
+
     var result = Module.ctx.getParameter(name_);
     switch (typeof(result)) {
       case "number":
@@ -639,7 +726,11 @@ var LibraryGL = {
         {{{ makeSetValue('p', '0', 'result != 0', 'i8') }}};
         break;
       case "string":
-        throw 'Native code calling glGetBooleanv(' + name_ + ') on a name which returns a string!';
+        GL.recordError(0x0500/*GL_INVALID_ENUM*/);
+#if GL_ASSERTIONS
+        Module.printErr('GL_INVALID_ENUM in glGetBooleanv: Native code calling glGetBooleanv(' + name_ + ') on a name which returns a string!');
+#endif
+        return;
       case "object":
         if (result === null) {
           {{{ makeSetValue('p', '0', '0', 'i8') }}};
@@ -657,13 +748,19 @@ var LibraryGL = {
                    result instanceof WebGLTexture) {
           {{{ makeSetValue('p', '0', '1', 'i8') }}}; // non-zero ID is always 1!
         } else {
-          throw 'Unknown object returned from WebGL getParameter';
+          GL.recordError(0x0500/*GL_INVALID_ENUM*/);
+#if GL_ASSERTIONS
+          Module.printErr('GL_INVALID_ENUM in glGetBooleanv: Unknown object returned from WebGL getParameter(' + name_ + ')!');
+#endif
+          return;
         }
         break;
-      case "undefined":
-          throw 'Unknown object returned from WebGL getParameter';
       default:
-        throw 'Why did we hit the default case?';
+        GL.recordError(0x0500/*GL_INVALID_ENUM*/);
+#if GL_ASSERTIONS
+        Module.printErr('GL_INVALID_ENUM in glGetBooleanv: Native code calling glGetBooleanv(' + name_ + ') and it returns ' + result + ' of type ' + typeof(result) + '!');
+#endif
+        return;
     }
   },
 
@@ -751,7 +848,12 @@ var LibraryGL = {
       case 0x1908 /* GL_RGBA */:
         sizePerPixel = 4;
         break;
-      default: throw 'unsupported glReadPixels format';
+      default: 
+        GL.recordError(0x0500/*GL_INVALID_ENUM*/);
+#if GL_ASSERTIONS
+        Module.printErr('GL_INVALID_ENUM in glReadPixels: Unsupported format ' + format + '!');
+#endif
+        return;
     }
     var totalSize = width*height*sizePerPixel;
     Module.ctx.readPixels(x, y, width, height, format, type, HEAPU8.subarray(pixels, pixels + totalSize));
@@ -955,11 +1057,12 @@ var LibraryGL = {
       name = name.slice(0, ls);
     }
 
-    var ptable = GL.uniformTable[program];
+    var ptable = GL.programInfos[program];
     if (!ptable) {
       return -1;
     }
-    var uniformInfo = ptable[name]; // returns pair [ dimension_of_uniform_array, uniform_location ]
+    var utable = ptable.uniforms;
+    var uniformInfo = utable[name]; // returns pair [ dimension_of_uniform_array, uniform_location ]
     if (uniformInfo && arrayOffset < uniformInfo[0]) { // Check if user asked for an out-of-bounds element, i.e. for 'vec4 colors[3];' user could ask for 'colors[10]' which should return -1.
       return uniformInfo[1]+arrayOffset;
     } else {
@@ -1447,6 +1550,47 @@ var LibraryGL = {
 #endif
     if (pname == 0x8B84) { // GL_INFO_LOG_LENGTH
       {{{ makeSetValue('p', '0', 'Module.ctx.getProgramInfoLog(GL.programs[program]).length + 1', 'i32') }}};
+    } else if (pname == 0x8B87 /* GL_ACTIVE_UNIFORM_MAX_LENGTH */) {
+      var ptable = GL.programInfos[program];
+      if (ptable) {
+        {{{ makeSetValue('p', '0', 'ptable.maxUniformLength', 'i32') }}};
+        return;
+      } else if (program < GL.counter) {
+#if GL_ASSERTIONS
+        Module.printErr("A GL object " + program + " that is not a program object was passed to glGetProgramiv!");
+#endif
+        GL.recordError(0x0502 /* GL_INVALID_OPERATION */);
+      } else {
+#if GL_ASSERTIONS
+        Module.printErr("A GL object " + program + " that did not come from GL was passed to glGetProgramiv!");
+#endif
+        GL.recordError(0x0501 /* GL_INVALID_VALUE */);
+      }
+    } else if (pname == 0x8B8A /* GL_ACTIVE_ATTRIBUTE_MAX_LENGTH */) {
+      var ptable = GL.programInfos[program];
+      if (ptable) {
+        if (ptable.maxAttributeLength == -1) {
+          var program = GL.programs[program];
+          var numAttribs = Module.ctx.getProgramParameter(program, Module.ctx.ACTIVE_ATTRIBUTES);
+          ptable.maxAttributeLength = 0; // Spec says if there are no active attribs, 0 must be returned.
+          for(var i = 0; i < numAttribs; ++i) {
+            var activeAttrib = Module.ctx.getActiveAttrib(program, i);
+            ptable.maxAttributeLength = Math.max(ptable.maxAttributeLength, activeAttrib.name.length+1);
+          }
+        }
+        {{{ makeSetValue('p', '0', 'ptable.maxAttributeLength', 'i32') }}};
+        return;
+      } else if (program < GL.counter) {
+#if GL_ASSERTIONS
+        Module.printErr("A GL object " + program + " that is not a program object was passed to glGetProgramiv!");
+#endif
+        GL.recordError(0x0502 /* GL_INVALID_OPERATION */);
+      } else {
+#if GL_ASSERTIONS
+        Module.printErr("A GL object " + program + " that did not come from GL was passed to glGetProgramiv!");
+#endif
+        GL.recordError(0x0501 /* GL_INVALID_VALUE */);
+      }
     } else {
       {{{ makeSetValue('p', '0', 'Module.ctx.getProgramParameter(GL.programs[program], pname)', 'i32') }}};
     }
@@ -1474,7 +1618,7 @@ var LibraryGL = {
     Module.ctx.deleteProgram(program);
     program.name = 0;
     GL.programs[program] = null;
-    GL.uniformTable[program] = null;
+    GL.programInfos[program] = null;
   },
 
   glAttachShader__sig: 'vii',
@@ -1510,7 +1654,7 @@ var LibraryGL = {
     GL.validateGLObjectID(GL.programs, program, 'glLinkProgram', 'program');
 #endif
     Module.ctx.linkProgram(GL.programs[program]);
-    GL.uniformTable[program] = {}; // uniforms no longer keep the same names after linking
+    GL.programInfos[program] = null; // uniforms no longer keep the same names after linking
     GL.populateUniformTable(program);
   },
 
@@ -2123,9 +2267,6 @@ var LibraryGL = {
   glGetShaderPrecisionFormat__sig: 'v',
   glGetShaderPrecisionFormat: function() { throw 'glGetShaderPrecisionFormat: TODO' },
 
-  glShaderBinary__sig: 'v',
-  glShaderBinary: function() { throw 'glShaderBinary: TODO' },
-
   glDeleteObject__sig: 'vi',
   glDeleteObject: function(id) {
     if (GL.programs[id]) {
@@ -2135,11 +2276,6 @@ var LibraryGL = {
     } else {
       Module.printErr('WARNING: deleteObject received invalid id: ' + id);
     }
-  },
-
-  glReleaseShaderCompiler__sig: 'v',
-  glReleaseShaderCompiler: function() {
-    // NOP (as allowed by GLES 2.0 spec)
   },
 
   glGetObjectParameteriv__sig: 'viii',
@@ -2191,7 +2327,12 @@ var LibraryGL = {
         attribute = GLImmediate.clientAttributes[GLImmediate.COLOR]; break;
       case 0x8092: // GL_TEXTURE_COORD_ARRAY_POINTER
         attribute = GLImmediate.clientAttributes[GLImmediate.TEXTURE0 + GLImmediate.clientActiveTexture]; break;
-      default: throw 'TODO: glGetPointerv for ' + name;
+      default:
+        GL.recordError(0x0500/*GL_INVALID_ENUM*/);
+#if GL_ASSERTIONS
+        Module.printErr('GL_INVALID_ENUM in glGetPointerv: Unsupported name ' + name + '!');
+#endif
+        return;
     }
     {{{ makeSetValue('p', '0', 'attribute ? attribute.pointer : 0', 'i32') }}};
   },
@@ -4625,6 +4766,30 @@ var LibraryGL = {
 #endif
   },
 
+  glShaderBinary__sig: 'v',
+  glShaderBinary: function() {
+    GL.recordError(0x0500/*GL_INVALID_ENUM*/);
+#if GL_ASSERTIONS
+    Module.printErr("GL_INVALID_ENUM in glShaderBinary: WebGL does not support binary shader formats! Calls to glShaderBinary always fail.");
+#endif    
+  },
+
+  glReleaseShaderCompiler__sig: 'v',
+  glReleaseShaderCompiler: function() {
+    // NOP (as allowed by GLES 2.0 spec)
+  },
+
+  glGetError__sig: 'i',
+  glGetError: function() {
+    // First return any GL error generated by the emscripten library_gl.js interop layer.
+    if (GL.lastError) {
+      var error = GL.lastError;
+      GL.lastError = 0/*GL_NO_ERROR*/;
+      return error;
+    } else { // If there were none, return the GL error from the browser GL context.
+      return Module.ctx.getError();
+    }
+  },
   // signatures of simple pass-through functions, see later
 
   glActiveTexture__sig: 'vi',
@@ -4658,14 +4823,13 @@ var LibraryGL = {
   glFlush__sig: 'v',
   glClearColor__sig: 'viiii',
   glIsEnabled__sig: 'ii',
-  glGetError__sig: 'i',
   glFrontFace__sig: 'vi',
   glSampleCoverage__sig: 'vi',
 };
 
 
 // Simple pass-through functions. Starred ones have return values. [X] ones have X in the C name but not in the JS name
-[[0, 'getError* finish flush'],
+[[0, 'finish flush'],
  [1, 'clearDepth clearDepth[f] depthFunc enable disable frontFace cullFace clear lineWidth clearStencil depthMask stencilMask checkFramebufferStatus* generateMipmap activeTexture blendEquation sampleCoverage isEnabled*'],
  [2, 'blendFunc blendEquationSeparate depthRange depthRange[f] stencilMaskSeparate hint polygonOffset vertexAttrib1f'],
  [3, 'texParameteri texParameterf vertexAttrib2f stencilFunc stencilOp'],
