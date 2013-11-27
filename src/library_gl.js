@@ -4465,7 +4465,7 @@ var LibraryGL = {
   },
 
   glLogicOp: function() {
-    Module.printErr("glLogicOp is unsupported. Ignoring.");
+    Runtime.warnOnce("glLogicOp is unsupported. Ignoring.");
   },
 
   glMultMatrixd: function(matrix) {
