@@ -725,7 +725,8 @@ def emscript_fast(infile, settings, outfile, libraries=[], compiler_engine=None,
     outfile: The file where the output is written.
   """
 
-  compiler = path_from_root('src', 'compiler.js')
+  assert(settings['ASM_JS']) # TODO: apply ASM_JS even in -O0 for fastcomp
+  assert(settings['RUNNING_JS_OPTS'])
 
   # Overview:
   #   * Run LLVM backend to emit JS. JS includes function bodies, memory initializer,
@@ -742,31 +743,32 @@ def emscript_fast(infile, settings, outfile, libraries=[], compiler_engine=None,
 
   if DEBUG: logging.debug('  ..1..')
   temp1 = temp_files.get('.1.bc').name
-  shared.jsrun.timeout_run(subprocess.Popen([os.path.join(shared.PNACL_ROOT, 'opt'), infile, '-pnacl-abi-simplify-preopt', '-o', temp1]))
+  shared.jsrun.timeout_run(subprocess.Popen([os.path.join(shared.LLVM_ROOT, 'opt'), infile, '-pnacl-abi-simplify-preopt', '-o', temp1]))
   assert os.path.exists(temp1)
   if DEBUG:
     shutil.copyfile(temp1, os.path.join(shared.CANONICAL_TEMP_DIR, 'temp1.bc'))
-    shared.jsrun.timeout_run(subprocess.Popen([os.path.join(shared.PNACL_ROOT, 'llvm-dis'), 'temp1.bc', '-o', 'temp1.ll']))
+    shared.jsrun.timeout_run(subprocess.Popen([os.path.join(shared.LLVM_ROOT, 'llvm-dis'), 'temp1.bc', '-o', 'temp1.ll']))
 
-  if DEBUG: logging.debug('  ..2..')
-  temp2 = temp_files.get('.2.bc').name
-  shared.jsrun.timeout_run(subprocess.Popen([os.path.join(shared.PNACL_ROOT, 'opt'), temp1, '-O3', '-o', temp2]))
-  assert os.path.exists(temp2)
-  if DEBUG:
-    shutil.copyfile(temp2, os.path.join(shared.CANONICAL_TEMP_DIR, 'temp2.bc'))
-    shared.jsrun.timeout_run(subprocess.Popen([os.path.join(shared.PNACL_ROOT, 'llvm-dis'), 'temp2.bc', '-o', 'temp2.ll']))
+  #if DEBUG: logging.debug('  ..2..')
+  #temp2 = temp_files.get('.2.bc').name
+  #shared.jsrun.timeout_run(subprocess.Popen([os.path.join(shared.LLVM_ROOT, 'opt'), temp1, '-O3', '-o', temp2]))
+  #assert os.path.exists(temp2)
+  #if DEBUG:
+  #  shutil.copyfile(temp2, os.path.join(shared.CANONICAL_TEMP_DIR, 'temp2.bc'))
+  #  shared.jsrun.timeout_run(subprocess.Popen([os.path.join(shared.LLVM_ROOT, 'llvm-dis'), 'temp2.bc', '-o', 'temp2.ll']))
+  temp2 = temp1 # XXX if we optimize the bc, we remove some pnacl clutter, but it also makes varargs stores be 8-byte aligned
 
   if DEBUG: logging.debug('  ..3..')
   temp3 = temp_files.get('.3.bc').name
-  shared.jsrun.timeout_run(subprocess.Popen([os.path.join(shared.PNACL_ROOT, 'opt'), temp2, '-pnacl-abi-simplify-postopt', '-o', temp3]))
+  shared.jsrun.timeout_run(subprocess.Popen([os.path.join(shared.LLVM_ROOT, 'opt'), temp2, '-pnacl-abi-simplify-postopt', '-o', temp3]))
   assert os.path.exists(temp3)
   if DEBUG:
     shutil.copyfile(temp3, os.path.join(shared.CANONICAL_TEMP_DIR, 'temp3.bc'))
-    shared.jsrun.timeout_run(subprocess.Popen([os.path.join(shared.PNACL_ROOT, 'llvm-dis'), 'temp3.bc', '-o', 'temp3.ll']))
+    shared.jsrun.timeout_run(subprocess.Popen([os.path.join(shared.LLVM_ROOT, 'llvm-dis'), 'temp3.bc', '-o', 'temp3.ll']))
 
   if DEBUG: logging.debug('  ..4..')
   temp4 = temp_files.get('.4.js').name
-  backend_compiler = os.path.join(shared.JS_BACKEND_ROOT, 'llc')
+  backend_compiler = os.path.join(shared.LLVM_ROOT, 'llc')
   shared.jsrun.timeout_run(subprocess.Popen([backend_compiler, temp3, '-march=js', '-filetype=asm', '-o', temp4], stdout=subprocess.PIPE))
   if DEBUG: shutil.copyfile(temp4, os.path.join(shared.CANONICAL_TEMP_DIR, 'temp4.js'))
 
@@ -794,7 +796,15 @@ def emscript_fast(infile, settings, outfile, libraries=[], compiler_engine=None,
   if DEBUG: logging.debug('emscript: js compiler glue')
 
   # Integrate info from backend
-  settings['DEFAULT_LIBRARY_FUNCS_TO_INCLUDE'] = settings['DEFAULT_LIBRARY_FUNCS_TO_INCLUDE'] + metadata['declares']
+  settings['DEFAULT_LIBRARY_FUNCS_TO_INCLUDE'] = list(
+    set(settings['DEFAULT_LIBRARY_FUNCS_TO_INCLUDE'] + map(shared.JS.to_nice_ident, metadata['declares'])).difference(
+      map(lambda x: x[1:], metadata['implementedFunctions'])
+    )
+  ) + map(lambda x: x[1:], metadata['externs'])
+
+  # Settings changes
+  assert settings['TARGET_LE32'] == 1
+  settings['TARGET_LE32'] = 2
 
   # Save settings to a file to work around v8 issue 1579
   settings_file = temp_files.get('.txt').name
@@ -808,7 +818,7 @@ def emscript_fast(infile, settings, outfile, libraries=[], compiler_engine=None,
 
   # Call js compiler
   if DEBUG: t = time.time()
-  out = jsrun.run_js(compiler, compiler_engine, [settings_file, ';', 'glue'] + libraries, stdout=subprocess.PIPE, stderr=STDERR_FILE,
+  out = jsrun.run_js(path_from_root('src', 'compiler.js'), compiler_engine, [settings_file, ';', 'glue'] + libraries, stdout=subprocess.PIPE, stderr=STDERR_FILE,
                      cwd=path_from_root('src'))
   assert '//FORWARDED_DATA:' in out, 'Did not receive forwarded data in pre output - process failed?'
   glue, forwarded_data = out.split('//FORWARDED_DATA:')
@@ -992,7 +1002,7 @@ def emscript_fast(infile, settings, outfile, libraries=[], compiler_engine=None,
       pass
     # If no named globals, only need externals
     global_vars = []
-    global_funcs = ['_' + key for key, value in forwarded_json['Functions']['libraryFunctions'].iteritems() if value != 2]
+    global_funcs = ['_' + key for key, value in forwarded_json['Functions']['libraryFunctions'].iteritems() if value != 2] + metadata['externs']
     def math_fix(g):
       return g if not g.startswith('Math_') else g.split('_')[1]
     asm_global_funcs = ''.join(['  var ' + g.replace('.', '_') + '=global.' + g + ';\n' for g in maths]) + \

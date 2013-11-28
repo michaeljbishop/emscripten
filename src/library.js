@@ -23,6 +23,7 @@ LibraryManager.library = {
   stdout: 'allocate(1, "i32*", ALLOC_STATIC)',
   stderr: 'allocate(1, "i32*", ALLOC_STATIC)',
   _impure_ptr: 'allocate(1, "i32*", ALLOC_STATIC)',
+  __dso_handle: 'allocate(1, "i32*", ALLOC_STATIC)',
 
   // ==========================================================================
   // dirent.h
@@ -1865,7 +1866,11 @@ LibraryManager.library = {
       //       int x = 4; printf("%c\n", (char)x);
       var ret;
       if (type === 'double') {
+#if TARGET_LE32 == 2
+        ret = {{{ makeGetValue('varargs', 'argIndex', 'double', undefined, undefined, true, 4) }}};
+#else
         ret = {{{ makeGetValue('varargs', 'argIndex', 'double', undefined, undefined, true) }}};
+#endif
 #if USE_TYPED_ARRAYS == 2
       } else if (type == 'i64') {
 
@@ -1886,7 +1891,11 @@ LibraryManager.library = {
         type = 'i32'; // varargs are always i32, i64, or double
         ret = {{{ makeGetValue('varargs', 'argIndex', 'i32', undefined, undefined, true) }}};
       }
+#if TARGET_LE32 == 2
+      argIndex += Runtime.getNativeFieldSize(type);
+#else
       argIndex += Math.max(Runtime.getNativeFieldSize(type), Runtime.getAlignSize(type, null, true));
+#endif
       return ret;
     }
 
@@ -4667,6 +4676,10 @@ LibraryManager.library = {
 
   llvm_dbg_declare__inline: function() { throw 'llvm_debug_declare' }, // avoid warning
 
+  // llvm-nacl
+
+  llvm_nacl_atomic_store_i32__inline: true,
+
   // ==========================================================================
   // llvm-mono integration
   // ==========================================================================
@@ -6965,7 +6978,7 @@ LibraryManager.library = {
 
   pthread_setspecific__deps: ['$PTHREAD_SPECIFIC', '$ERRNO_CODES'],
   pthread_setspecific: function(key, value) {
-    if (value == 0) {
+    if (!(key in PTHREAD_SPECIFIC)) {
       return ERRNO_CODES.EINVAL;
     }
     PTHREAD_SPECIFIC[key] = value;
@@ -8734,8 +8747,72 @@ LibraryManager.library = {
   // emscripten vector ops
   //============================
 
-  emscripten_float32x4_signmask__inline: function(x) {
-    return x + '.signMask()';
+  emscripten_float32x4_signmask__inline: function(a) {
+    return 'SIMD.float32x4.bitsToInt32x4(' + a + ').signMask';
+  },
+  
+  emscripten_float32x4_min__inline: function(a, b) {
+    return 'SIMD.float32x4.min(' + a + ', ' + b + ')';
+  },
+  
+  emscripten_float32x4_max__inline: function(a, b) {
+    return 'SIMD.float32x4.max(' + a + ', ' + b + ')';
+  },
+  
+  emscripten_float32x4_sqrt__inline: function(a) {
+    return 'SIMD.float32x4.sqrt(' + a + ')';
+  },
+  
+  emscripten_float32x4_lessThan__inline: function(a, b) {
+    return 'SIMD.int32x4.bitsToFloat32x4(SIMD.float32x4.lessThan(' + a + ', ' + b + '))';
+  },
+  
+  emscripten_float32x4_lessThanOrEqual__inline: function(a, b) {
+    return 'SIMD.int32x4.bitsToFloat32x4(SIMD.float32x4.lessThanOrEqual(' + a + ', ' + b + '))';
+  },
+  
+  emscripten_float32x4_equal__inline: function(a, b) {
+    return 'SIMD.int32x4.bitsToFloat32x4(SIMD.float32x4.equal(' + a + ', ' + b + '))';
+  },
+  
+  emscripten_float32x4_greaterThanOrEqual__inline: function(a, b) {
+    return 'SIMD.int32x4.bitsToFloat32x4(SIMD.float32x4.greaterThanOrEqual(' + a + ', ' + b + '))';
+  },
+  
+  emscripten_float32x4_greaterThan__inline: function(a, b) {
+    return 'SIMD.int32x4.bitsToFloat32x4(SIMD.float32x4.greaterThan(' + a + ', ' + b + '))';
+  },
+  
+  emscripten_float32x4_and__inline: function(a, b) {
+    return 'SIMD.int32x4.bitsToFloat32x4(SIMD.int32x4.and(SIMD.float32x4.bitsToInt32x4(' + a + '), SIMD.float32x4.bitsToInt32x4(' + b + ')))';
+  },
+  
+  emscripten_float32x4_andNot__inline: function(a, b) {
+    return 'SIMD.int32x4.bitsToFloat32x4(SIMD.int32x4.and(SIMD.int32x4.not(SIMD.float32x4.bitsToInt32x4(' + a + ')), SIMD.float32x4.bitsToInt32x4(' + b + ')))';
+  },
+  
+  emscripten_float32x4_or__inline: function(a, b) {
+    return 'SIMD.int32x4.bitsToFloat32x4(SIMD.int32x4.or(SIMD.float32x4.bitsToInt32x4(' + a + '), SIMD.float32x4.bitsToInt32x4(' + b + ')))';
+  },
+  
+  emscripten_float32x4_xor__inline: function(a, b) {
+    return 'SIMD.int32x4.bitsToFloat32x4(SIMD.int32x4.xor(SIMD.float32x4.bitsToInt32x4(' + a + '), SIMD.float32x4.bitsToInt32x4(' + b + ')))';
+  },
+  
+  emscripten_int32x4_bitsToFloat32x4__inline: function(a) {
+      return 'SIMD.int32x4.bitsToFloat32x4(' + a + ')';
+  },
+  
+  emscripten_int32x4_toFloat32x4__inline: function(a) {
+      return 'SIMD.int32x4.toFloat32x4(' + a + ')';
+  },
+  
+  emscripten_float32x4_bitsToInt32x4__inline: function(a) {
+      return 'SIMD.float32x4.bitsToInt32x4(' + a + ')';
+  },
+  
+  emscripten_float32x4_toInt32x4__inline: function(a) {
+      return 'SIMD.float32x4.toInt32x4(' + a + ')';
   },
 
   //============================

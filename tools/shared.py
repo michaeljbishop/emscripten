@@ -1411,6 +1411,10 @@ class Building:
   @staticmethod
   def ensure_relooper(relooper):
     if os.path.exists(relooper): return
+    if os.environ.get('EMCC_FAST_COMPILER'):
+      logging.debug('not building relooper to js, using it in c++ backend')
+      return
+
     Cache.ensure()
     curr = os.getcwd()
     try:
@@ -1509,7 +1513,7 @@ class JS:
 
   @staticmethod
   def to_nice_ident(ident): # limited version of the JS function toNiceIdent
-    return ident.replace('%', '$').replace('@', '_')
+    return ident.replace('%', '$').replace('@', '_').replace('.', '_')
 
   @staticmethod
   def make_initializer(sig, settings=None):
