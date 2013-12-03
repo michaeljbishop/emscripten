@@ -479,6 +479,11 @@ LibraryManager.library = {
   mkstemp: function(template) {
     return _creat(_mktemp(template), 0600);
   },
+  mkdtemp__deps: ['mktemp', 'mkdir'],
+  mkdtemp: function(template) {
+    template = _mktemp(template);
+    return (_mkdir(template, 0700) === 0) ? template : 0;
+  },
   fcntl__deps: ['$FS', '__setErrNo', '$ERRNO_CODES'],
   fcntl: function(fildes, cmd, varargs, dup2) {
     // int fcntl(int fildes, int cmd, ...);
@@ -543,7 +548,7 @@ LibraryManager.library = {
     // Advise as much as you wish. We don't care.
     return 0;
   },
-  posix_madvise: 'posix_fadvise',
+  posix_madvise: function(){ return 0 }, // ditto as fadvise
   posix_fallocate__deps: ['$FS', '__setErrNo', '$ERRNO_CODES'],
   posix_fallocate: function(fd, offset, len) {
     // int posix_fallocate(int fd, off_t offset, off_t len);
@@ -2524,6 +2529,10 @@ LibraryManager.library = {
     }
     var bytesRead = 0;
     var streamObj = FS.getStream(stream);
+    if (!streamObj) {
+      ___setErrNo(ERRNO_CODES.EBADF);
+      return 0;
+    }
     while (streamObj.ungotten.length && bytesToRead > 0) {
       {{{ makeSetValue('ptr++', '0', 'streamObj.ungotten.pop()', 'i8') }}}
       bytesToRead--;
@@ -3541,13 +3550,15 @@ LibraryManager.library = {
   llvm_memcpy_p0i8_p0i8_i32: 'memcpy',
   llvm_memcpy_p0i8_p0i8_i64: 'memcpy',
 
-  memmove__sig: 'viii',
+  memmove__sig: 'iiii',
   memmove__asm: true,
   memmove__deps: ['memcpy'],
   memmove: function(dest, src, num) {
     dest = dest|0; src = src|0; num = num|0;
+    var ret = 0;
     if (((src|0) < (dest|0)) & ((dest|0) < ((src + num)|0))) {
       // Unlikely case: Copy backwards in a safe manner
+      ret = dest;
       src = (src + num)|0;
       dest = (dest + num)|0;
       while ((num|0) > 0) {
@@ -3556,9 +3567,11 @@ LibraryManager.library = {
         num = (num - 1)|0;
         {{{ makeSetValueAsm('dest', 0, makeGetValueAsm('src', 0, 'i8'), 'i8') }}};
       }
+      dest = ret;
     } else {
       _memcpy(dest, src, num) | 0;
     }
+    return dest | 0;
   },
   llvm_memmove_i32: 'memmove',
   llvm_memmove_i64: 'memmove',
@@ -3575,7 +3588,7 @@ LibraryManager.library = {
   memset__inline: function(ptr, value, num, align) {
     return makeSetValues(ptr, 0, value, 'null', num, align);
   },
-  memset__sig: 'viii',
+  memset__sig: 'iiii',
   memset__asm: true,
   memset: function(ptr, value, num) {
 #if USE_TYPED_ARRAYS == 2
@@ -3604,8 +3617,10 @@ LibraryManager.library = {
       {{{ makeSetValueAsm('ptr', 0, 'value', 'i8') }}};
       ptr = (ptr+1)|0;
     }
+    return (ptr-num)|0;
 #else
     {{{ makeSetValues('ptr', '0', 'value', 'null', 'num') }}};
+    return ptr;
 #endif
   },
   llvm_memset_i32: 'memset',

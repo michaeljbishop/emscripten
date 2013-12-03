@@ -800,7 +800,7 @@ def emscript_fast(infile, settings, outfile, libraries=[], compiler_engine=None,
     set(settings['DEFAULT_LIBRARY_FUNCS_TO_INCLUDE'] + map(shared.JS.to_nice_ident, metadata['declares'])).difference(
       map(lambda x: x[1:], metadata['implementedFunctions'])
     )
-  ) + map(lambda x: x[1:], metadata['externs'])
+  ) + map(lambda x: x[1:], metadata['externFuncs'])
 
   # Settings changes
   assert settings['TARGET_LE32'] == 1
@@ -838,7 +838,7 @@ def emscript_fast(infile, settings, outfile, libraries=[], compiler_engine=None,
   # memory initializer
 
   pre = pre.replace('STATICTOP = STATIC_BASE + 0;', '''STATICTOP = STATIC_BASE + Runtime.alignMemory(%d);
-// /* global initializers */ __ATINIT__.push({ func: function() { runPostSets() } });
+/* global initializers */ __ATINIT__.push({ func: function() { runPostSets() } });
 %s''' % (mem_init.count(',')+1, mem_init)) # XXX wrong size calculation!
 
   funcs_js = [funcs]
@@ -852,6 +852,7 @@ def emscript_fast(infile, settings, outfile, libraries=[], compiler_engine=None,
 
   # merge forwarded data
   assert settings.get('ASM_JS'), 'fastcomp is asm.js only'
+  settings['EXPORTED_FUNCTIONS'] = forwarded_json['EXPORTED_FUNCTIONS']
   all_exported_functions = set(settings['EXPORTED_FUNCTIONS']) # both asm.js and otherwise
   for additional_export in settings['DEFAULT_LIBRARY_FUNCS_TO_INCLUDE']: # additional functions to export from asm, if they are implemented
     all_exported_functions.add('_' + additional_export)
@@ -861,14 +862,6 @@ def emscript_fast(infile, settings, outfile, libraries=[], compiler_engine=None,
   for key in metadata['implementedFunctions'] + forwarded_json['Functions']['implementedFunctions'].keys(): # XXX perf
     if key in all_exported_functions or export_all or (export_bindings and key.startswith('_emscripten_bind')):
       exported_implemented_functions.add(key)
-
-  if settings.get('ASM_JS'):
-    # move postsets into the asm module
-    class PostSets: js = ''
-    def handle_post_sets(m):
-      PostSets.js = m.group(0)
-      return '\n'
-    pre = re.sub(r'function runPostSets[^}]+}', handle_post_sets, pre)
 
   #if DEBUG: outfile.write('// pre\n')
   outfile.write(pre)
@@ -1001,8 +994,8 @@ def emscript_fast(infile, settings, outfile, libraries=[], compiler_engine=None,
     except:
       pass
     # If no named globals, only need externals
-    global_vars = []
-    global_funcs = ['_' + key for key, value in forwarded_json['Functions']['libraryFunctions'].iteritems() if value != 2] + metadata['externs']
+    global_vars = metadata['externVars'] #+ forwarded_json['Variables']['globals']
+    global_funcs = list(set(['_' + key for key, value in forwarded_json['Functions']['libraryFunctions'].iteritems() if value != 2] + metadata['externFuncs']))
     def math_fix(g):
       return g if not g.startswith('Math_') else g.split('_')[1]
     asm_global_funcs = ''.join(['  var ' + g.replace('.', '_') + '=global.' + g + ';\n' for g in maths]) + \
@@ -1105,7 +1098,7 @@ function setTempRet%d(value) {
   value = value|0;
   tempRet%d = value;
 }
-''' % (i, i) for i in range(10)])] + [PostSets.js + '\n'] + funcs_js + ['''
+''' % (i, i) for i in range(10)])] + funcs_js + ['''
   %s
 
   return %s;
