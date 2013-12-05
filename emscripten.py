@@ -793,6 +793,15 @@ def emscript_fast(infile, settings, outfile, libraries=[], compiler_engine=None,
   #if DEBUG: print >> sys.stderr, "META", metadata
   #if DEBUG: print >> sys.stderr, "meminit", mem_init
 
+  # function table masks
+
+  table_sizes = {}
+  for k, v in metadata['tables'].iteritems():
+    table_sizes[k] = str(v.count(',')) # undercounts by one, but that is what we want
+  funcs = re.sub(r"#FM_(\w+)#", lambda m: table_sizes[m.groups(0)[0]], funcs)
+
+  # js compiler
+
   if DEBUG: logging.debug('emscript: js compiler glue')
 
   # Integrate info from backend
@@ -827,6 +836,10 @@ def emscript_fast(infile, settings, outfile, libraries=[], compiler_engine=None,
 
   last_forwarded_json = forwarded_json = json.loads(forwarded_data)
 
+  # merge in information from llvm backend
+
+  last_forwarded_json['Functions']['tables'] = metadata['tables']
+
   '''indexed_functions = set()
   for key in forwarded_json['Functions']['indexedFunctions'].iterkeys():
     indexed_functions.add(key)'''
@@ -835,11 +848,13 @@ def emscript_fast(infile, settings, outfile, libraries=[], compiler_engine=None,
 
   #print >> sys.stderr, 'glue:', pre, '\n\n||||||||||||||||\n\n', post, '...............'
 
-  # memory initializer
+  # memory and global initializers
+
+  global_initializers = ', '.join(map(lambda i: '{ func: function() { %s() } }' % i, metadata['initializers']))
 
   pre = pre.replace('STATICTOP = STATIC_BASE + 0;', '''STATICTOP = STATIC_BASE + Runtime.alignMemory(%d);
-/* global initializers */ __ATINIT__.push({ func: function() { runPostSets() } });
-%s''' % (mem_init.count(',')+1, mem_init)) # XXX wrong size calculation!
+/* global initializers */ __ATINIT__.push(%s);
+%s''' % (mem_init.count(',')+1, global_initializers, mem_init)) # XXX wrong size calculation!
 
   funcs_js = [funcs]
   if settings.get('ASM_JS'):
@@ -887,8 +902,11 @@ def emscript_fast(infile, settings, outfile, libraries=[], compiler_engine=None,
     class Counter:
       i = 0
       j = 0
-    pre_tables = last_forwarded_json['Functions']['tables']['pre']
-    del last_forwarded_json['Functions']['tables']['pre']
+    if 'pre' in last_forwarded_json['Functions']['tables']:
+      pre_tables = last_forwarded_json['Functions']['tables']['pre']
+      del last_forwarded_json['Functions']['tables']['pre']
+    else:
+      pre_tables = ''
 
     def make_table(sig, raw):
       i = Counter.i
@@ -979,7 +997,7 @@ def emscript_fast(infile, settings, outfile, libraries=[], compiler_engine=None,
         basic_funcs.append('extCall_%s' % sig)
 
     # calculate exports
-    exported_implemented_functions = list(exported_implemented_functions)
+    exported_implemented_functions = list(exported_implemented_functions) + metadata['initializers']
     exported_implemented_functions.append('runPostSets')
     exports = []
     if not simple:
