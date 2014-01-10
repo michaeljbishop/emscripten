@@ -176,13 +176,28 @@ if WINDOWS:
 else:
   logging.StreamHandler.emit = add_coloring_to_emit_ansi(logging.StreamHandler.emit)
 
-# Emscripten configuration is done through the EM_CONFIG environment variable.
-# If the string value contained in this environment variable contains newline
-# separated definitions, then these definitions will be used to configure
+# Emscripten configuration is done through the --em-config command line option or
+# the EM_CONFIG environment variable. If the specified string value contains newline
+# or semicolon-separated definitions, then these definitions will be used to configure
 # Emscripten.  Otherwise, the string is understood to be a path to a settings
 # file that contains the required definitions.
 
-EM_CONFIG = os.environ.get('EM_CONFIG')
+try:
+  EM_CONFIG = sys.argv[sys.argv.index('--em-config')+1]
+  # Emscripten compiler spawns other processes, which can reimport shared.py, so make sure that
+  # those child processes get the same configuration file by setting it to the currently active environment.
+  os.environ['EM_CONFIG'] = EM_CONFIG
+except:
+  EM_CONFIG = os.environ.get('EM_CONFIG')
+
+if EM_CONFIG and not os.path.isfile(EM_CONFIG):
+  if EM_CONFIG.startswith('-'):
+    raise Exception('Passed --em-config without an argument. Usage: --em-config /path/to/.emscripten or --em-config EMSCRIPTEN_ROOT=/path/;LLVM_ROOT=/path;...')
+  if not '=' in EM_CONFIG:
+    raise Exception('File ' + EM_CONFIG + ' passed to --em-config does not exist!')
+  else:
+    EM_CONFIG = EM_CONFIG.replace(';', '\n') + '\n'
+
 if not EM_CONFIG:
   EM_CONFIG = '~/.emscripten'
 if '\n' in EM_CONFIG:
@@ -257,9 +272,17 @@ if EM_POPEN_WORKAROUND and os.name == 'nt':
 
 EXPECTED_LLVM_VERSION = (3,2)
 
+actual_clang_version = None
+
+def get_clang_version():
+  global actual_clang_version
+  if actual_clang_version is None:
+    actual_clang_version = Popen([CLANG, '-v'], stderr=PIPE).communicate()[1].split('\n')[0].split(' ')[2]
+  return actual_clang_version
+
 def check_clang_version():
-  expected = 'clang version ' + '.'.join(map(str, EXPECTED_LLVM_VERSION))
-  actual = Popen([CLANG, '-v'], stderr=PIPE).communicate()[1].split('\n')[0]
+  expected = '.'.join(map(str, EXPECTED_LLVM_VERSION))
+  actual = get_clang_version()
   if expected in actual:
     return True
   logging.warning('LLVM version appears incorrect (seeing "%s", expected "%s")' % (actual, expected))
@@ -270,6 +293,21 @@ def check_llvm_version():
     check_clang_version()
   except Exception, e:
     logging.warning('Could not verify LLVM version: %s' % str(e))
+
+def check_fastcomp():
+  try:
+    llc_version_info = Popen([LLVM_COMPILER, '--version'], stdout=PIPE).communicate()[0]
+    pre, targets = llc_version_info.split('Registered Targets:')
+    if 'js' not in targets or 'JavaScript (asm.js, emscripten) backend' not in targets:
+      logging.critical('fastcomp in use, but LLVM has not been built with the JavaScript backend as a target, llc reports:')
+      print >> sys.stderr, '==========================================================================='
+      print >> sys.stderr, llc_version_info,
+      print >> sys.stderr, '==========================================================================='
+      return False
+    return True
+  except Exception, e:
+    logging.warning('cound not check fastcomp: %s' % str(e))
+    return True
 
 EXPECTED_NODE_VERSION = (0,8,0)
 
@@ -307,16 +345,16 @@ def find_temp_directory():
 # we re-check sanity when the settings are changed)
 # We also re-check sanity and clear the cache when the version changes
 
-EMSCRIPTEN_VERSION = '1.7.8'
+EMSCRIPTEN_VERSION = '1.8.6'
 
 def generate_sanity():
-  return EMSCRIPTEN_VERSION + '|' + get_llvm_target() + '|' + LLVM_ROOT
+  return EMSCRIPTEN_VERSION + '|' + get_llvm_target() + '|' + LLVM_ROOT + '|' + get_clang_version()
 
 def check_sanity(force=False):
   try:
     reason = None
     if not CONFIG_FILE:
-      if not force: return # config stored directly in EM_CONFIG => skip sanity checks
+      return # config stored directly in EM_CONFIG => skip sanity checks
     else:
       settings_mtime = os.stat(CONFIG_FILE).st_mtime
       sanity_file = CONFIG_FILE + '_sanity'
@@ -338,9 +376,11 @@ def check_sanity(force=False):
       Cache.erase()
       force = False # the check actually failed, so definitely write out the sanity file, to avoid others later seeing failures too
 
-    # some warning, not fatal checks - do them even if EM_IGNORE_SANITY is on
+    # some warning, mostly not fatal checks - do them even if EM_IGNORE_SANITY is on
     check_llvm_version()
     check_node_version()
+    if os.environ.get('EMCC_FAST_COMPILER') == '1':
+      fastcomp_ok = check_fastcomp()
 
     if os.environ.get('EM_IGNORE_SANITY'):
       logging.info('EM_IGNORE_SANITY set, ignoring sanity checks')
@@ -360,6 +400,11 @@ def check_sanity(force=False):
     for cmd in [CLANG, LINK_CMD[0], LLVM_AR, LLVM_OPT, LLVM_AS, LLVM_DIS, LLVM_NM, LLVM_INTERPRETER]:
       if not os.path.exists(cmd) and not os.path.exists(cmd + '.exe'): # .exe extension required for Windows
         logging.critical('Cannot find %s, check the paths in %s' % (cmd, EM_CONFIG))
+        sys.exit(1)
+
+    if os.environ.get('EMCC_FAST_COMPILER') == '1':
+      if not fastcomp_ok:
+        logging.critical('failing sanity checks due to previous fastcomp failure')
         sys.exit(1)
 
     try:
@@ -667,7 +712,7 @@ def line_splitter(data):
 
   return out
 
-def limit_size(string, MAX=12000*20):
+def limit_size(string, MAX=800*20):
   if len(string) < MAX: return string
   return string[0:MAX/2] + '\n[..]\n' + string[-MAX/2:]
 
@@ -926,7 +971,7 @@ class Building:
 
 
   @staticmethod
-  def build_library(name, build_dir, output_dir, generated_libs, configure=['sh', './configure'], configure_args=[], make=['make'], make_args=['-j', '2'], cache=None, cache_name=None, copy_project=False, env_init={}, source_dir=None, native=False):
+  def build_library(name, build_dir, output_dir, generated_libs, configure=['sh', './configure'], configure_args=[], make=['make'], make_args='help', cache=None, cache_name=None, copy_project=False, env_init={}, source_dir=None, native=False):
     ''' Build a library into a .bc file. We build the .bc file once and cache it for all our tests. (We cache in
         memory since the test directory is destroyed and recreated for each test. Note that we cache separately
         for different compilers).
@@ -934,6 +979,8 @@ class Building:
 
     if type(generated_libs) is not list: generated_libs = [generated_libs]
     if source_dir is None: source_dir = path_from_root('tests', name.replace('_native', ''))
+    if make_args == 'help':
+      make_args = ['-j', str(multiprocessing.cpu_count())]
 
     temp_dir = build_dir
     if copy_project:
@@ -1077,7 +1124,7 @@ class Building:
     # 8k is a bit of an arbitrary limit, but a reasonable one
     # for max command line size before we use a respose file
     response_file = None
-    if WINDOWS and len(' '.join(link_cmd)) > 8192:
+    if len(' '.join(link_cmd)) > 8192:
       logging.debug('using response file for llvm-link')
       [response_fd, response_file] = mkstemp(suffix='.response', dir=TEMP_DIR)
 
@@ -1124,6 +1171,8 @@ class Building:
     if type(opts) is int:
       opts = Building.pick_llvm_opts(opts)
     #opts += ['-debug-pass=Arguments']
+    if get_clang_version() == '3.4' and not Settings.SIMD:
+      opts += ['-disable-loop-vectorization', '-disable-slp-vectorization'] # llvm 3.4 has these on by default
     logging.debug('emcc: LLVM opts: ' + str(opts))
     target = out or (filename + '.opt.bc')
     output = Popen([LLVM_OPT, filename] + opts + ['-o', target], stdout=PIPE).communicate()[0]
@@ -1365,6 +1414,8 @@ class Building:
     if not os.path.exists(CLOSURE_COMPILER):
       raise Exception('Closure compiler appears to be missing, looked at: ' + str(CLOSURE_COMPILER))
 
+    CLOSURE_EXTERNS = path_from_root('src', 'closure-externs.js')
+
     # Something like this (adjust memory as needed):
     #   java -Xmx1024m -jar CLOSURE_COMPILER --compilation_level ADVANCED_OPTIMIZATIONS --variable_map_output_file src.cpp.o.js.vars --js src.cpp.o.js --js_output_file src.cpp.o.cc.js
     args = [JAVA,
@@ -1372,6 +1423,7 @@ class Building:
             '-jar', CLOSURE_COMPILER,
             '--compilation_level', 'ADVANCED_OPTIMIZATIONS',
             '--language_in', 'ECMASCRIPT5',
+            '--externs', CLOSURE_EXTERNS,
             #'--variable_map_output_file', filename + '.vars',
             '--js', filename, '--js_output_file', filename + '.cc.js']
     if pretty: args += ['--formatting', 'PRETTY_PRINT']
@@ -1421,7 +1473,7 @@ class Building:
   @staticmethod
   def ensure_relooper(relooper):
     if os.path.exists(relooper): return
-    if os.environ.get('EMCC_FAST_COMPILER'):
+    if os.environ.get('EMCC_FAST_COMPILER') == '1':
       logging.debug('not building relooper to js, using it in c++ backend')
       return
 
@@ -1496,6 +1548,8 @@ class Building:
       text = m.groups(0)[0]
       assert text.count('(') == 1 and text.count(')') == 1, 'must have simple expressions in emscripten_jcache_printf calls, no parens'
       assert text.count('"') == 2, 'must have simple expressions in emscripten_jcache_printf calls, no strings as varargs parameters'
+      if os.environ.get('EMCC_FAST_COMPILER') == '1': # fake it in fastcomp
+        return text.replace('emscripten_jcache_printf', 'printf')
       start = text.index('(')
       end = text.rindex(')')
       args = text[start+1:end].split(',')

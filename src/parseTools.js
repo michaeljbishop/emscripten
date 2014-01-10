@@ -16,6 +16,7 @@ function processMacros(text) {
 
 // Simple #if/else/endif preprocessing for a file. Checks if the
 // ident checked is true in our global.
+// Also handles #include x.js (similar to C #include <file>)
 function preprocess(text) {
   var lines = text.split('\n');
   var ret = '';
@@ -30,25 +31,30 @@ function preprocess(text) {
         ret += line + '\n';
       }
     } else {
-      if (line[1] && line[1] == 'i') { // if
-        var parts = line.split(' ');
-        var ident = parts[1];
-        var op = parts[2];
-        var value = parts[3];
-        if (op) {
-          if (op === '==') {
-            showStack.push(ident in this && this[ident] == value);
-          } else if (op === '!=') {
-            showStack.push(!(ident in this && this[ident] == value));
+      if (line[1] == 'i') {
+        if (line[2] == 'f') { // if
+          var parts = line.split(' ');
+          var ident = parts[1];
+          var op = parts[2];
+          var value = parts[3];
+          if (op) {
+            if (op === '==') {
+              showStack.push(ident in this && this[ident] == value);
+            } else if (op === '!=') {
+              showStack.push(!(ident in this && this[ident] == value));
+            } else {
+              error('unsupported preprecessor op ' + op);
+            }
           } else {
-            error('unsupported preprecessor op ' + op);
+            showStack.push(ident in this && this[ident] > 0);
           }
-        } else {
-          showStack.push(ident in this && this[ident] > 0);
+        } else if (line[2] == 'n') { // include
+          var included = read(line.substr(line.indexOf(' ')+1));
+          ret += '\n' + preprocess(included) + '\n'
         }
-      } else if (line[2] && line[2] == 'l') { // else
+      } else if (line[2] == 'l') { // else
         showStack.push(!showStack.pop());
-      } else if (line[2] && line[2] == 'n') { // endif
+      } else if (line[2] == 'n') { // endif
         showStack.pop();
       } else {
         throw "Unclear preprocessor command: " + line;
@@ -457,7 +463,7 @@ function parseParamTokens(params) {
       // handle 'byval' and 'byval align X'. We store the alignment in 'byVal'
       byVal = QUANTUM_SIZE;
       segment.splice(1, 1);
-      if (segment[1] && segment[1].text === 'nocapture') {
+      if (segment[1] && (segment[1].text === 'nocapture' || segment[1].text === 'readonly')) {
         segment.splice(1, 1);
       }
       if (segment[1] && segment[1].text === 'align') {
@@ -466,7 +472,7 @@ function parseParamTokens(params) {
         segment.splice(1, 2);
       }
     }
-    if (segment[1] && segment[1].text === 'nocapture') {
+    if (segment[1] && (segment[1].text === 'nocapture' || segment[1].text === 'readonly')) {
       segment.splice(1, 1);
     }
     if (segment.length == 1) {
@@ -622,7 +628,7 @@ function parseLLVMSegment(segment) {
 }
 
 function cleanSegment(segment) {
-  while (segment.length >= 2 && ['noalias', 'sret', 'nocapture', 'nest', 'zeroext', 'signext'].indexOf(segment[1].text) != -1) {
+  while (segment.length >= 2 && ['noalias', 'sret', 'nocapture', 'nest', 'zeroext', 'signext', 'readnone'].indexOf(segment[1].text) != -1) {
     segment.splice(1, 1);
   }
   return segment;
@@ -1634,7 +1640,10 @@ function getFastValue(a, op, b, type) {
 }
 
 function getFastValues(list, op, type) {
-  assert(op == '+');
+  assert(op === '+' && type === 'i32');
+  for (var i = 0; i < list.length; i++) {
+    if (isNumber(list[i])) list[i] = (list[i]|0) + '';
+  }
   var changed = true;
   while (changed) {
     changed = false;
@@ -1642,6 +1651,7 @@ function getFastValues(list, op, type) {
       var fast = getFastValue(list[i], op, list[i+1], type);
       var raw = list[i] + op + list[i+1];
       if (fast.length < raw.length || fast.indexOf(op) < 0) {
+        if (isNumber(fast)) fast = (fast|0) + '';
         list[i] = fast;
         list.splice(i+1, 1);
         i--;
