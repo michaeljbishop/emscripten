@@ -1746,4 +1746,21 @@ keydown(100);keyup(100); // trigger the end
     # Now run test in browser
     self.btest(path_from_root('tests', 'uuid', 'test.c'), '1')
 
+  def test_glew(self):
+    self.btest(path_from_root('tests', 'glew.c'), expected='1')
+    self.btest(path_from_root('tests', 'glew.c'), args=['-s', 'LEGACY_GL_EMULATION=1'], expected='1')
+    self.btest(path_from_root('tests', 'glew.c'), args=['-DGLEW_MX'], expected='1')
+    self.btest(path_from_root('tests', 'glew.c'), args=['-s', 'LEGACY_GL_EMULATION=1', '-DGLEW_MX'], expected='1')
+
+  def test_doublestart_bug(self):
+    open('pre.js', 'w').write(r'''
+if (typeof Module === 'undefined') Module = eval('(function() { try { return Module || {} } catch(e) { return {} } })()');
+if (!Module['preRun']) Module['preRun'] = [];
+Module["preRun"].push(function () {
+    Module['addRunDependency']('test_run_dependency');
+    Module['removeRunDependency']('test_run_dependency');
+});
+''')
+
+    self.btest('doublestart.c', args=['--pre-js', 'pre.js', '-o', 'test.html'], expected='1')
 
