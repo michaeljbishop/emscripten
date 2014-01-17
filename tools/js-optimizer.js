@@ -1773,9 +1773,7 @@ function ensureMinifiedNames(n) { // make sure the nth index in minifiedNames ex
   }
 }
 
-// Very simple 'registerization', coalescing of variables into a smaller number,
-// as part of minification. Globals-level minification began in a previous pass,
-// we receive extraInfo which tells us how to rename globals. (Only in asm.js.)
+// Very simple 'registerization', coalescing of variables into a smaller number.
 //
 // We do not optimize when there are switches, so this pass only makes sense with
 // relooping.
@@ -1811,6 +1809,7 @@ function registerize(ast) {
     // Replace all var definitions with assignments; we will add var definitions at the top after we registerize
     // We also mark local variables - i.e., having a var definition
     var localVars = {};
+    var allVars = {};
     var hasSwitch = false; // we cannot optimize variables if there is a switch, unless in asm mode
     traverse(fun, function(node, type) {
       if (type === 'var') {
@@ -1823,74 +1822,25 @@ function registerize(ast) {
         }
       } else if (type === 'switch') {
         hasSwitch = true;
+      } else if (type === 'name') {
+        allVars[node[1]] = 1;
       }
     });
     vacuum(fun);
-    if (extraInfo && extraInfo.globals) {
-      assert(asm);
-      var usedGlobals = {};
-      var nextLocal = 0;
-      // Minify globals using the mapping we were given
-      traverse(fun, function(node, type) {
-        if (type === 'name') {
-          var name = node[1];
-          var minified = extraInfo.globals[name];
-          if (minified) {
-            assert(!localVars[name], name); // locals must not shadow globals, or else we don't know which is which
-            if (localVars[minified]) {
-              // trying to minify a global into a name used locally. rename all the locals
-              var newName = '$_newLocal_' + (nextLocal++);
-              assert(!localVars[newName]);
-              if (params[minified]) {
-                params[newName] = 1;
-                delete params[minified];
-              }
-              localVars[newName] = 1;
-              delete localVars[minified];
-              asmData.vars[newName] = asmData.vars[minified];
-              delete asmData.vars[minified];
-              asmData.params[newName] = asmData.params[minified];
-              delete asmData.params[minified];
-              traverse(fun, function(node, type) {
-                if (type === 'name' && node[1] === minified) {
-                  node[1] = newName;
-                }
-              });
-              if (fun[2]) {
-                for (var i = 0; i < fun[2].length; i++) {
-                  if (fun[2][i] === minified) fun[2][i] = newName;
-                }
-              }
-            }
-            node[1] = minified;
-            usedGlobals[minified] = 1;
-          }
-        }
-      });
-      if (fun[1] in extraInfo.globals) { // if fun was created by a previous optimization pass, it will not be here
-        fun[1] = extraInfo.globals[fun[1]];
-        assert(fun[1]);
-      }
-      var nextRegName = 0;
-    }
     var regTypes = {};
     function getNewRegName(num, name) {
-      if (!asm) return 'r' + num;
-      var type = asmData.vars[name];
-      if (!extraInfo || !extraInfo.globals) {
-        var ret = (type ? 'd' : 'i') + num;
+      var ret;
+      if (!asm) {
+        ret = 'r' + num;
+      } else {
+        var type = asmData.vars[name];
+        ret = (type ? 'd' : 'i') + num;
         regTypes[ret] = type;
-        return ret;
       }
-      // find the next free minified name that is not used by a global that shows up in this function
-      while (1) {
-        ensureMinifiedNames(nextRegName);
-        var ret = minifiedNames[nextRegName++];
-        if (!usedGlobals[ret]) {
-          regTypes[ret] = type;
-          return ret;
-        }
+      if (ret in allVars) {
+        assert(ret in localVars, 'register shadows non-local name');
       }
+      return ret;
     }
     // Find the # of uses of each variable.
     // While doing so, check if all a variable's uses are dominated in a simple
@@ -2111,33 +2061,6 @@ function registerize(ast) {
         }
       }
       denormalizeAsm(fun, finalAsmData);
-      if (extraInfo && extraInfo.globals) {
-        // minify in asm var definitions, that denormalizeAsm just generated
-        function minify(value) {
-          if (value && value[0] === 'call' && value[1][0] === 'name') {
-            var name = value[1][1];
-            var minified = extraInfo.globals[name];
-            if (minified) {
-              value[1][1] = minified;
-            }
-          }
-        }
-        var stats = fun[3];
-        for (var i = 0; i < stats.length; i++) {
-          var line = stats[i];
-          if (i >= fun[2].length && line[0] !== 'var') break; // when we pass the arg and var coercions, break
-          if (line[0] === 'stat') {
-            assert(line[1][0] === 'assign');
-            minify(line[1][3]);
-          } else {
-            assert(line[0] === 'var');
-            var pairs = line[1];
-            for (var j = 0; j < pairs.length; j++) {
-              minify(pairs[j][1]);
-            }
-          }
-        }
-      }
     }
   });
 }
@@ -2322,7 +2245,7 @@ function eliminate(ast, memSafe) {
     var memoryInvalidated = false;
     var callsInvalidated = false;
     function track(name, value, defNode) { // add a potential that has just been defined to the tracked list, we hope to eliminate it
-      var usesGlobals = false, usesMemory = false, deps = {}, doesCall = false;
+      var usesGlobals = false, usesMemory = false, deps = {}, doesCall = false, hasDeps = false;
       var ignoreName = false; // one-time ignorings of names, as first op in sub and call
       traverse(value, function(node, type) {
         if (type === 'name') {
@@ -2333,6 +2256,7 @@ function eliminate(ast, memSafe) {
             }
             if (!(name in potentials)) { // deps do not matter for potentials - they are defined once, so no complexity
               deps[name] = 1;
+              hasDeps = true;
             }
           } else {
             ignoreName = false;
@@ -2354,6 +2278,7 @@ function eliminate(ast, memSafe) {
         usesMemory: usesMemory,
         defNode: defNode,
         deps: deps,
+        hasDeps: hasDeps,
         doesCall: doesCall
       };
       globalsInvalidated = false;
@@ -2426,7 +2351,7 @@ function eliminate(ast, memSafe) {
       function traverseInOrder(node, ignoreSub, ignoreName) {
         if (abort) return;
         //nesting++; // printErr-related
-        //printErr(spaces(2*(nesting+1)) + 'trav: ' + JSON.stringify(node).substr(0, 50) + ' : ' + keys(tracked) + ' : ' + [allowTracking, ignoreSub, ignoreName]);
+        //printErr(JSON.stringify(node).substr(0, 50) + ' : ' + keys(tracked) + ' : ' + [allowTracking, ignoreSub, ignoreName]);
         var type = node[0];
         if (type === 'assign') {
           var target = node[2];
@@ -2602,6 +2527,8 @@ function eliminate(ast, memSafe) {
           traverseInOrder(node[3]);
         } else if (type === 'switch') {
           traverseInOrder(node[1]);
+          var originalTracked = {};
+          for (var o in tracked) originalTracked[o] = 1;
           var cases = node[2];
           for (var i = 0; i < cases.length; i++) {
             var c = cases[i];
@@ -2609,6 +2536,15 @@ function eliminate(ast, memSafe) {
             var stats = c[1];
             for (var j = 0; j < stats.length; j++) {
               traverseInOrder(stats[j]);
+            }
+            // We cannot track from one switch case into another, undo all new trackings TODO: general framework here, use in if-else as well
+            for (var t in tracked) {
+              if (!(t in originalTracked)) {
+                var info = tracked[t];
+                if (info.usesGlobals || info.usesMemory || info.hasDeps) {
+                  delete tracked[t];
+                }
+              }
             }
           }
         } else {
@@ -2898,6 +2834,92 @@ function minifyGlobals(ast) {
     }
   });
   suffix = '// EXTRA_INFO:' + JSON.stringify(minified);
+}
+
+
+function minifyLocals(ast) {
+  assert(asm)
+  assert(extraInfo && extraInfo.globals)
+
+  traverseGeneratedFunctions(ast, function(fun, type) {
+
+    // Analyse the asmjs to figure out local variable names,
+    // but operate on the original source tree so that we don't
+    // miss any global names in e.g. variable initializers.
+    var asmData = normalizeAsm(fun); denormalizeAsm(fun, asmData); // TODO: we can avoid modifying at all here - we just need a list of local vars+params
+    var newNames = {};
+    var usedNames = {};
+
+    // Find all the globals that we need to minify using
+    // pre-assigned names.  Don't actually minify them yet
+    // as that might interfere with local variable names.
+    function isLocalName(name) {
+      return name in asmData.vars || name in asmData.params;
+    }
+    traverse(fun, function(node, type) {
+      if (type === 'name') {
+        var name = node[1];
+        if (!isLocalName(name)) {
+          var minified = extraInfo.globals[name];
+          if (minified){
+            newNames[name] = minified;
+            usedNames[minified] = 1;
+          }
+        }
+      }
+    });
+
+    // Traverse and minify all names.
+    // The first time we encounter a local name, we assign it a
+    // minified name that's not currently in use.  Allocating on
+    // demand means they're processed in a predicatable order,
+    // which is very handy for testing/debugging purposes.
+    var nextMinifiedName = 0;
+    function getNextMinifiedName() {
+      var minified;
+      while (1) {
+        ensureMinifiedNames(nextMinifiedName);
+        minified = minifiedNames[nextMinifiedName++];
+        // TODO: we can probably remove !isLocalName here
+        if (!usedNames[minified] && !isLocalName(minified)) {
+          return minified;
+        }
+      }
+    }
+    if (fun[1] in extraInfo.globals) {
+      fun[1] = extraInfo.globals[fun[1]];
+      assert(fun[1]);
+    }
+    if (fun[2]) {
+      for (var i = 0; i < fun[2].length; i++) {
+        var minified = getNextMinifiedName();
+        newNames[fun[2][i]] = minified;
+        fun[2][i] = minified;
+      }
+    }
+    traverse(fun[3], function(node, type) {
+      if (type === 'name') {
+        var name = node[1];
+        var minified = newNames[name];
+        if (minified) {
+          node[1] = minified;
+        } else if (isLocalName(name)) {
+          minified = getNextMinifiedName();
+          newNames[name] = minified;
+          node[1] = minified;
+        }
+      } else if (type === 'var') {
+        node[1].forEach(function(defn) {
+          var name = defn[0];
+          if (!(name in newNames)) {
+            newNames[name] = getNextMinifiedName();
+          }
+          defn[0] = newNames[name];
+        });
+      }
+    });
+
+  });
 }
 
 // Relocation pass for a shared module (for the functions part of the module)
@@ -3866,6 +3888,104 @@ function outline(ast) {
   });
 }
 
+function safeHeap(ast) {
+  function fixPtr(ptr, heap) {
+    switch (heap) {
+      case 'HEAP8':   case 'HEAPU8': break;
+      case 'HEAP16':  case 'HEAPU16': {
+        if (ptr[0] === 'binary') {
+          assert(ptr[1] === '>>' && ptr[3][0] === 'num' && ptr[3][1] === 1);
+          ptr = ptr[2]; // skip the shift
+        } else {
+          ptr = ['binary', '*', ptr, ['num', 2]]; // was unshifted, convert to absolute address
+        }
+        break;
+      }
+      case 'HEAP32':  case 'HEAPU32': {
+        if (ptr[0] === 'binary') {
+          assert(ptr[1] === '>>' && ptr[3][0] === 'num' && ptr[3][1] === 2);
+          ptr = ptr[2]; // skip the shift
+        } else {
+          ptr = ['binary', '*', ptr, ['num', 4]]; // was unshifted, convert to absolute address
+        }
+        break;
+      }
+      case 'HEAPF32': {
+        if (ptr[0] === 'binary') {
+          assert(ptr[1] === '>>' && ptr[3][0] === 'num' && ptr[3][1] === 2);
+          ptr = ptr[2]; // skip the shift
+        } else {
+          ptr = ['binary', '*', ptr, ['num', 4]]; // was unshifted, convert to absolute address
+        }
+        break;
+      }
+      case 'HEAPF64': {
+        if (ptr[0] === 'binary') {
+          assert(ptr[1] === '>>' && ptr[3][0] === 'num' && ptr[3][1] === 3);
+          ptr = ptr[2]; // skip the shift
+        } else {
+          ptr = ['binary', '*', ptr, ['num', 8]]; // was unshifted, convert to absolute address
+        }
+        break;
+      }
+      default: throw 'bad heap ' + heap;
+    }
+    ptr = ['binary', '|', ptr, ['num', 0]];
+    return ptr;
+  }
+  traverseGenerated(ast, function(node, type) {
+    if (type === 'assign') {
+      if (node[1] === true && node[2][0] === 'sub') {
+        var heap = node[2][1][1];
+        var ptr = fixPtr(node[2][2], heap);
+        var value = node[3];
+        // SAFE_HEAP_STORE(ptr, value, bytes, isFloat) 
+        switch (heap) {
+          case 'HEAP8':   case 'HEAPU8': {
+            return ['call', ['name', 'SAFE_HEAP_STORE'], [ptr, makeAsmCoercion(value, ASM_INT), ['num', 1], ['num', '0']]];
+          }
+          case 'HEAP16':  case 'HEAPU16': {
+            return ['call', ['name', 'SAFE_HEAP_STORE'], [ptr, makeAsmCoercion(value, ASM_INT), ['num', 2], ['num', '0']]];
+          }
+          case 'HEAP32':  case 'HEAPU32': {
+            return ['call', ['name', 'SAFE_HEAP_STORE'], [ptr, makeAsmCoercion(value, ASM_INT), ['num', 4], ['num', '0']]];
+          }
+          case 'HEAPF32': {
+            return ['call', ['name', 'SAFE_HEAP_STORE'], [ptr, makeAsmCoercion(value, ASM_DOUBLE), ['num', 4], ['num', '1']]];
+          }
+          case 'HEAPF64': {
+            return ['call', ['name', 'SAFE_HEAP_STORE'], [ptr, makeAsmCoercion(value, ASM_DOUBLE), ['num', 8], ['num', '1']]];
+          }
+          default: throw 'bad heap ' + heap;
+        }
+      }
+    } else if (type === 'sub') {
+      var heap = node[1][1];
+      if (heap[0] !== 'H') return;
+      var ptr = fixPtr(node[2], heap);
+      // SAFE_HEAP_LOAD(ptr, bytes, isFloat) 
+      switch (heap) {
+        case 'HEAP8':   case 'HEAPU8': {
+          return makeAsmCoercion(['call', ['name', 'SAFE_HEAP_LOAD'], [ptr, ['num', 1], ['num', '0']]], ASM_INT);
+        }
+        case 'HEAP16':  case 'HEAPU16': {
+          return makeAsmCoercion(['call', ['name', 'SAFE_HEAP_LOAD'], [ptr, ['num', 2], ['num', '0']]], ASM_INT);
+        }
+        case 'HEAP32':  case 'HEAPU32': {
+          return makeAsmCoercion(['call', ['name', 'SAFE_HEAP_LOAD'], [ptr, ['num', 4], ['num', '0']]], ASM_INT);
+        }
+        case 'HEAPF32': {
+          return makeAsmCoercion(['call', ['name', 'SAFE_HEAP_LOAD'], [ptr, ['num', 4], ['num', '1']]], ASM_DOUBLE);
+        }
+        case 'HEAPF64': {
+          return makeAsmCoercion(['call', ['name', 'SAFE_HEAP_LOAD'], [ptr, ['num', 8], ['num', '1']]], ASM_DOUBLE);
+        }
+        default: throw 'bad heap ' + heap;
+      }
+    }
+  });
+}
+
 // Last pass utilities
 
 // Change +5 to DOT$ZERO(5). We then textually change 5 to 5.0 (uglify's ast cannot differentiate between 5 and 5.0 directly)
@@ -3956,6 +4076,7 @@ function asmLastOpts(ast) {
 var minifyWhitespace = false, printMetadata = true, asm = false, last = false;
 
 var passes = {
+  // passes
   dumpAst: dumpAst,
   dumpSrc: dumpSrc,
   unGlobalize: unGlobalize,
@@ -3971,8 +4092,12 @@ var passes = {
   eliminateMemSafe: eliminateMemSafe,
   aggressiveVariableElimination: aggressiveVariableElimination,
   minifyGlobals: minifyGlobals,
+  minifyLocals: minifyLocals,
   relocate: relocate,
   outline: outline,
+  safeHeap: safeHeap,
+
+  // flags
   minifyWhitespace: function() { minifyWhitespace = true },
   noPrintMetadata: function() { printMetadata = false },
   asm: function() { asm = true },

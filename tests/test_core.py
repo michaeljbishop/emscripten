@@ -1486,7 +1486,7 @@ class T(RunnerCore): # Short name, to make it more fun to use manually on the co
 
   def test_segfault(self):
     if self.emcc_args is None: return self.skip('SAFE_HEAP without ta2 means we check types too, which hide segfaults')
-    if Settings.ASM_JS: return self.skip('asm does not support safe heap')
+    if os.environ.get('EMCC_FAST_COMPILER') == '1' and '-O2' not in self.emcc_args: return self.skip('todo in non-jsopts-enabled fastcomp')
 
     Settings.SAFE_HEAP = 1
 
@@ -1606,6 +1606,8 @@ class T(RunnerCore): # Short name, to make it more fun to use manually on the co
       self.do_run_from_file(src, output)
 
   def test_alloca(self):
+    if Settings.USE_TYPED_ARRAYS != 2: return self.skip('non-ta2 may have unaligned allocas')
+
     test_path = path_from_root('tests', 'core', 'test_alloca')
     src, output = (test_path + s for s in ('.in', '.out'))
 
@@ -3701,6 +3703,12 @@ ok
     test_path = path_from_root('tests', 'core', 'test_strstr')
     src, output = (test_path + s for s in ('.in', '.out'))
 
+    self.do_run_from_file(src, output)
+
+  def test_fnmatch(self):
+    if self.emcc_args is None: return self.skip('requires linking in libc++')
+    test_path = path_from_root('tests', 'core', 'fnmatch')
+    src, output = (test_path + s for s in ('.c', '.out'))
     self.do_run_from_file(src, output)
 
   def test_sscanf(self):
@@ -6415,7 +6423,10 @@ o2 = make_run("o2", compiler=CLANG, emcc_args=["-O2", "-s", "ASM_JS=0", "-s", "J
 asm1 = make_run("asm1", compiler=CLANG, emcc_args=["-O1"])
 asm2 = make_run("asm2", compiler=CLANG, emcc_args=["-O2"])
 asm2f = make_run("asm2f", compiler=CLANG, emcc_args=["-O2", "-s", "PRECISE_F32=1"])
-asm2g = make_run("asm2g", compiler=CLANG, emcc_args=["-O2", "-g", "-s", "ASSERTIONS=1", "--memory-init-file", "1", "-s", "CHECK_HEAP_ALIGN=1"])
+if os.environ.get('EMCC_FAST_COMPILER') == '1':
+  asm2g = make_run("asm2g", compiler=CLANG, emcc_args=["-O2", "-g", "-s", "ASSERTIONS=1", "--memory-init-file", "1", "-s", "SAFE_HEAP=1"])
+else:
+  asm2g = make_run("asm2g", compiler=CLANG, emcc_args=["-O2", "-g", "-s", "ASSERTIONS=1", "--memory-init-file", "1", "-s", "CHECK_HEAP_ALIGN=1"])
 asm2x86 = make_run("asm2x86", compiler=CLANG, emcc_args=["-O2", "-g", "-s", "CHECK_HEAP_ALIGN=1"], env={"EMCC_LLVM_TARGET": "i386-pc-linux-gnu"})
 
 # Make custom runs with various options
