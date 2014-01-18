@@ -4073,6 +4073,7 @@ var LibraryGL = {
           }
           if (!GL.currProgram) {
             GLctx.useProgram(null);
+            GLImmediate.fixedFunctionProgram = 0;
           }
           if (!GL.currArrayBuffer) {
             GLctx.bindBuffer(GLctx.ARRAY_BUFFER, null);
