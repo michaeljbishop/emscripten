@@ -399,9 +399,6 @@ LibraryManager.library = {
     _umask.cmask = newMask;
     return oldMask;
   },
-  stat64: 'stat',
-  fstat64: 'fstat',
-  lstat64: 'lstat',
 
   // ==========================================================================
   // sys/statvfs.h
@@ -1565,9 +1562,6 @@ LibraryManager.library = {
     if (bytes != 0) self.alloc(bytes);
     return ret;  // Previous break location.
   },
-  open64: 'open',
-  lseek64: 'lseek',
-  ftruncate64: 'ftruncate',
 
   // ==========================================================================
   // stdio.h
@@ -2563,7 +2557,6 @@ LibraryManager.library = {
     return 0;
   },
   fseeko: 'fseek',
-  fseeko64: 'fseek',
   fsetpos__deps: ['$FS', 'lseek', '__setErrNo', '$ERRNO_CODES'],
   fsetpos: function(stream, pos) {
     // int fsetpos(FILE *stream, const fpos_t *pos);
@@ -2600,7 +2593,6 @@ LibraryManager.library = {
     }
   },
   ftello: 'ftell',
-  ftello64: 'ftell',
   fwrite__deps: ['$FS', 'write'],
   fwrite: function(ptr, size, nitems, stream) {
     // size_t fwrite(const void *restrict ptr, size_t size, size_t nitems, FILE *restrict stream);
