@@ -1206,8 +1206,10 @@ try:
       jcache = False
 
     fastcomp_opts = ['-pnacl-abi-simplify-preopt', '-pnacl-abi-simplify-postopt']
-    if not shared.Settings.DISABLE_EXCEPTION_CATCHING:
+    if shared.Settings.DISABLE_EXCEPTION_CATCHING != 1:
       fastcomp_opts += ['-enable-emscripten-cxx-exceptions']
+      if len(shared.Settings.EXCEPTION_CATCHING_WHITELIST) > 0:
+        fastcomp_opts += ['-emscripten-cxx-exceptions-whitelist=' + ','.join(shared.Settings.EXCEPTION_CATCHING_WHITELIST)]
 
   if shared.Settings.ASM_JS:
     assert opt_level >= 1 or fastcomp, 'asm.js requires -O1 or above'
@@ -1965,16 +1967,23 @@ try:
     if len(js_optimizer_extra_info) == 0:
       js_optimizer_extra_info = None
     if len(js_optimizer_queue) > 0 and not(not shared.Settings.ASM_JS and len(js_optimizer_queue) == 1 and js_optimizer_queue[0] == 'last'):
-      if DEBUG != '2':
+
+      def add_opt_args(args):
         if shared.Settings.ASM_JS:
-          js_optimizer_queue = ['asm'] + js_optimizer_queue
+          args = ['asm'] + args
+          if shared.Settings.PRECISE_F32:
+            args = ['asmPreciseF32'] + args
+        return args
+
+      if DEBUG != '2':
+        js_optimizer_queue = add_opt_args(js_optimizer_queue)
         logging.debug('applying js optimization passes: %s', js_optimizer_queue)
         final = shared.Building.js_optimizer(final, js_optimizer_queue, jcache, debug_level >= 4, js_optimizer_extra_info)
         js_transform_tempfiles.append(final)
         if DEBUG: save_intermediate('js_opts')
       else:
         for name in js_optimizer_queue:
-          passes = [name]
+          passes = add_opt_args([name])
           if shared.Settings.ASM_JS:
             passes = ['asm'] + passes
           logging.debug('applying js optimization pass: %s', passes)
@@ -2066,15 +2075,41 @@ try:
       html.write(shell.replace('{{{ SCRIPT }}}', '<script>' + open(shared.path_from_root('src', 'proxyClient.js')).read().replace('{{{ filename }}}', target_basename) + '</script>'))
       shutil.move(final, js_target)
     elif not Compression.on:
+      # Normal code generation path
       if debug_level >= 4:
         generate_source_map(target)
       shutil.move(final, js_target)
-      # TODO: use an async blob, which would allow code rewriting on the client:
-      #   var blob = new Blob([codeString]);
-      #   var script = document.createElement('script');
-      #   script.src = URL.createObjectURL(blob);
-      #   document.body.appendChild(script);
-      script_tag = '''<script async type="text/javascript" src="%s"></script>''' % base_js_target
+      if 1:
+        # Non-modifiable code, just load the code directly
+        script_tag = '''<script async type="text/javascript" src="%s"></script>''' % base_js_target
+      else:
+        # Potentially-modifiable code, load as text, modify, then execute. This lets you
+        # patch the code on the client machine right before it is executed, perhaps based
+        # on information about the client. For example,
+        #   code = code.replace(/Math_fround\(/g, '(');
+        # could be used to remove Math.fround optimization (in an unminified build), if
+        # the client does not support Math.fround natively.
+        code = '''
+// Load the code as text, and execute it asynchronously. This keeps everything
+// async and responsive, while also making it possible to modify the code on
+// the client, if necessary.
+var codeXHR = new XMLHttpRequest();
+codeXHR.open('GET', '%s', true);
+codeXHR.onload = function() {
+  var code = codeXHR.responseText;
+  var blob = new Blob([code], { type: 'text/javascript' });
+  codeXHR = null;
+  var src = URL.createObjectURL(blob);
+  var script = document.createElement('script');
+  script.src = URL.createObjectURL(blob);
+  script.onload = function() {
+    URL.revokeObjectURL(script.src);
+  };
+  document.body.appendChild(script);
+};
+codeXHR.send(null);
+''' % base_js_target
+        script_tag = '''<script>%s</script>''' % code
       html.write(shell.replace('{{{ SCRIPT }}}', script_tag))
     else:
       # Compress the main code

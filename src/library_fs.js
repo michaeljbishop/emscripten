@@ -48,7 +48,17 @@ mergeInto(LibraryManager.library, {
     //
     lookupPath: function(path, opts) {
       path = PATH.resolve(FS.cwd(), path);
-      opts = opts || { recurse_count: 0 };
+      opts = opts || {};
+
+      var defaults = {
+        follow_mount: true,
+        recurse_count: 0
+      };
+      for (var key in defaults) {
+        if (opts[key] === undefined) {
+          opts[key] = defaults[key];
+        }
+      }
 
       if (opts.recurse_count > 8) {  // max recursive lookup of 8
         throw new FS.ErrnoError(ERRNO_CODES.ELOOP);
@@ -75,10 +85,11 @@ mergeInto(LibraryManager.library, {
 
         // jump to the mount's root node if this is a mountpoint
         if (FS.isMountpoint(current)) {
-          current = current.mount.root;
+          if (!islast || (islast && opts.follow_mount)) {
+            current = current.mounted.root;
+          }
         }
 
-        // follow symlinks
         // by default, lookupPath will not follow a symlink if it is the final path component.
         // setting opts.follow = true will override this behavior.
         if (!islast || opts.follow) {
@@ -171,27 +182,25 @@ mergeInto(LibraryManager.library, {
     createNode: function(parent, name, mode, rdev) {
       if (!FS.FSNode) {
         FS.FSNode = function(parent, name, mode, rdev) {
+          if (!parent) {
+            parent = this;  // root node sets parent to itself
+          }
+          this.parent = parent;
+          this.mount = parent.mount;
+          this.mounted = null;
           this.id = FS.nextInode++;
           this.name = name;
           this.mode = mode;
           this.node_ops = {};
           this.stream_ops = {};
           this.rdev = rdev;
-          this.parent = null;
-          this.mount = null;
-          if (!parent) {
-            parent = this;  // root node sets parent to itself
-          }
-          this.parent = parent;
-          this.mount = parent.mount;
-          FS.hashAddNode(this);
         };
+
+        FS.FSNode.prototype = {};
 
         // compatibility
         var readMode = {{{ cDefine('S_IRUGO') }}} | {{{ cDefine('S_IXUGO') }}};
         var writeMode = {{{ cDefine('S_IWUGO') }}};
-
-        FS.FSNode.prototype = {};
 
         // NOTE we must use Object.defineProperties instead of individual calls to
         // Object.defineProperty in order to make closure compiler happy
@@ -212,7 +221,12 @@ mergeInto(LibraryManager.library, {
           },
         });
       }
-      return new FS.FSNode(parent, name, mode, rdev);
+
+      var node = new FS.FSNode(parent, name, mode, rdev);
+
+      FS.hashAddNode(node);
+
+      return node;
     },
     destroyNode: function(node) {
       FS.hashRemoveNode(node);
@@ -221,7 +235,7 @@ mergeInto(LibraryManager.library, {
       return node === node.parent;
     },
     isMountpoint: function(node) {
-      return node.mounted;
+      return !!node.mounted;
     },
     isFile: function(mode) {
       return (mode & {{{ cDefine('S_IFMT') }}}) === {{{ cDefine('S_IFREG') }}};
@@ -449,61 +463,131 @@ mergeInto(LibraryManager.library, {
     //
     // core
     //
+    getMounts: function(mount) {
+      var mounts = [];
+      var check = [mount];
+
+      while (check.length) {
+        var m = check.pop();
+
+        mounts.push(m);
+
+        check.push.apply(check, m.mounts);
+      }
+
+      return mounts;
+    },
     syncfs: function(populate, callback) {
       if (typeof(populate) === 'function') {
         callback = populate;
         populate = false;
       }
 
+      var mounts = FS.getMounts(FS.root.mount);
       var completed = 0;
-      var total = FS.mounts.length;
+
       function done(err) {
         if (err) {
-          return callback(err);
+          if (!done.errored) {
+            done.errored = true;
+            return callback(err);
+          }
+          return;
         }
-        if (++completed >= total) {
+        if (++completed >= mounts.length) {
           callback(null);
         }
       };
 
       // sync all mounts
-      for (var i = 0; i < FS.mounts.length; i++) {
-        var mount = FS.mounts[i];
+      mounts.forEach(function (mount) {
         if (!mount.type.syncfs) {
-          done(null);
-          continue;
+          return done(null);
         }
         mount.type.syncfs(mount, populate, done);
-      }
+      });
     },
     mount: function(type, opts, mountpoint) {
-      var lookup;
-      if (mountpoint) {
-        lookup = FS.lookupPath(mountpoint, { follow: false });
+      var root = mountpoint === '/';
+      var pseudo = !mountpoint;
+      var node;
+
+      if (root && FS.root) {
+        throw new FS.ErrnoError(ERRNO_CODES.EBUSY);
+      } else if (!root && !pseudo) {
+        var lookup = FS.lookupPath(mountpoint, { follow_mount: false });
+
         mountpoint = lookup.path;  // use the absolute path
+        node = lookup.node;
+
+        if (FS.isMountpoint(node)) {
+          throw new FS.ErrnoError(ERRNO_CODES.EBUSY);
+        }
+
+        if (!FS.isDir(node.mode)) {
+          throw new FS.ErrnoError(ERRNO_CODES.ENOTDIR);
+        }
       }
+
       var mount = {
         type: type,
         opts: opts,
         mountpoint: mountpoint,
-        root: null
+        mounts: []
       };
+
       // create a root node for the fs
-      var root = type.mount(mount);
-      root.mount = mount;
-      mount.root = root;
-      // assign the mount info to the mountpoint's node
-      if (lookup) {
-        lookup.node.mount = mount;
-        lookup.node.mounted = true;
-        // compatibility update FS.root if we mount to /
-        if (mountpoint === '/') {
-          FS.root = mount.root;
+      var mountRoot = type.mount(mount);
+      mountRoot.mount = mount;
+      mount.root = mountRoot;
+
+      if (root) {
+        FS.root = mountRoot;
+      } else if (node) {
+        // set as a mountpoint
+        node.mounted = mount;
+
+        // add the new mount to the current mount's children
+        if (node.mount) {
+          node.mount.mounts.push(mount);
         }
       }
-      // add to our cached list of mounts
-      FS.mounts.push(mount);
-      return root;
+
+      return mountRoot;
+    },
+    unmount: function (mountpoint) {
+      var lookup = FS.lookupPath(mountpoint, { follow_mount: false });
+
+      if (!FS.isMountpoint(lookup.node)) {
+        throw new FS.ErrnoError(ERRNO_CODES.EINVAL);
+      }
+
+      // destroy the nodes for this mount, and all its child mounts
+      var node = lookup.node;
+      var mount = node.mounted;
+      var mounts = FS.getMounts(mount);
+
+      Object.keys(FS.nameTable).forEach(function (hash) {
+        var current = FS.nameTable[hash];
+
+        while (current) {
+          var next = current.name_next;
+
+          if (mounts.indexOf(current.mount) !== -1) {
+            FS.destroyNode(current);
+          }
+
+          current = next;
+        }
+      });
+
+      // no longer a mountpoint
+      node.mounted = null;
+
+      // remove this mount from the child mounts
+      var idx = node.mount.mounts.indexOf(mount);
+      assert(idx !== -1);
+      node.mount.mounts.splice(idx, 1);
     },
     lookup: function(parent, name) {
       return parent.node_ops.lookup(parent, name);
@@ -729,7 +813,7 @@ mergeInto(LibraryManager.library, {
       }
     },
     readlink: function(path) {
-      var lookup = FS.lookupPath(path, { follow: false });
+      var lookup = FS.lookupPath(path);
       var link = lookup.node;
       if (!link.node_ops.readlink) {
         throw new FS.ErrnoError(ERRNO_CODES.EINVAL);
@@ -1056,6 +1140,9 @@ mergeInto(LibraryManager.library, {
       opts = opts || {};
       opts.flags = opts.flags || 'r';
       opts.encoding = opts.encoding || 'binary';
+      if (opts.encoding !== 'utf8' && opts.encoding !== 'binary') {
+        throw new Error('Invalid encoding type "' + opts.encoding + '"');
+      }
       var ret;
       var stream = FS.open(path, opts.flags);
       var stat = FS.stat(path);
@@ -1070,8 +1157,6 @@ mergeInto(LibraryManager.library, {
         }
       } else if (opts.encoding === 'binary') {
         ret = buf;
-      } else {
-        throw new Error('Invalid encoding type "' + opts.encoding + '"');
       }
       FS.close(stream);
       return ret;
@@ -1080,15 +1165,16 @@ mergeInto(LibraryManager.library, {
       opts = opts || {};
       opts.flags = opts.flags || 'w';
       opts.encoding = opts.encoding || 'utf8';
+      if (opts.encoding !== 'utf8' && opts.encoding !== 'binary') {
+        throw new Error('Invalid encoding type "' + opts.encoding + '"');
+      }
       var stream = FS.open(path, opts.flags, opts.mode);
       if (opts.encoding === 'utf8') {
         var utf8 = new Runtime.UTF8Processor();
         var buf = new Uint8Array(utf8.processJSString(data));
-        FS.write(stream, buf, 0, buf.length, 0);
+        FS.write(stream, buf, 0, buf.length, 0, opts.canOwn);
       } else if (opts.encoding === 'binary') {
-        FS.write(stream, data, 0, data.length, 0);
-      } else {
-        throw new Error('Invalid encoding type "' + opts.encoding + '"');
+        FS.write(stream, data, 0, data.length, 0, opts.canOwn);
       }
       FS.close(stream);
     },
@@ -1203,7 +1289,6 @@ mergeInto(LibraryManager.library, {
 
       FS.nameTable = new Array(4096);
 
-      FS.root = FS.createNode(null, '/', {{{ cDefine('S_IFDIR') }}} | 0777, 0);
       FS.mount(MEMFS, {}, '/');
 
       FS.createDefaultDirectories();

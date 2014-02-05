@@ -722,14 +722,19 @@ function simplifyExpressions(ast) {
               if (correct === 'HEAP32') {
                 define[3] = ['binary', '|', define[3], ['num', 0]];
               } else {
-                define[3] = ['unary-prefix', '+', define[3]];
+                define[3] = makeAsmCoercion(define[3], asmPreciseF32 ? ASM_FLOAT : ASM_DOUBLE);
               }
               // do we want a simplifybitops on the new values here?
             });
             info.uses.forEach(function(use) {
               use[2][1][1] = correct;
             });
-            asmData.vars[v] = 1 - asmData.vars[v];
+            var correctType;
+            switch(asmData.vars[v]) {
+              case ASM_INT: correctType = asmPreciseF32 ? ASM_FLOAT : ASM_DOUBLE; break;
+              case ASM_FLOAT: case ASM_DOUBLE: correctType = ASM_INT; break;
+            }
+            asmData.vars[v] = correctType;
           }
         }
         denormalizeAsm(ast, asmData);
@@ -1138,7 +1143,9 @@ function optimizeShiftsAggressive(ast) {
 // or such. Simplifying these saves space and time.
 function simplifyNotCompsDirect(node) {
   if (node[0] === 'unary-prefix' && node[1] === '!') {
-    if (node[2][0] === 'binary') {
+    // de-morgan's laws do not work on floats, due to nans >:(
+    if (node[2][0] === 'binary' && (!asm || (((node[2][2][0] === 'binary' && node[2][2][1] === '|') || node[2][2][0] === 'num') &&
+                                             ((node[2][3][0] === 'binary' && node[2][3][1] === '|') || node[2][3][0] === 'num')))) {
       switch(node[2][1]) {
         case '<': return ['binary', '>=', node[2][2], node[2][3]];
         case '>': return ['binary', '<=', node[2][2], node[2][3]];
@@ -1577,7 +1584,7 @@ function makeAsmVarDef(v, type) {
     case ASM_INT: return [v, ['num', 0]];
     case ASM_DOUBLE: return [v, ['unary-prefix', '+', ['num', 0]]];
     case ASM_FLOAT: return [v, ['call', ['name', 'Math_fround'], [['num', 0]]]];
-    default: throw 'wha?';
+    default: throw 'wha? ' + JSON.stringify([node, type]) + new Error().stack;
   }
 }
 
@@ -5153,7 +5160,7 @@ function asmLastOpts(ast) {
 
 // Passes table
 
-var minifyWhitespace = false, printMetadata = true, asm = false, last = false;
+var minifyWhitespace = false, printMetadata = true, asm = false, asmPreciseF32 = false, last = false;
 
 var passes = {
   // passes
@@ -5182,6 +5189,7 @@ var passes = {
   minifyWhitespace: function() { minifyWhitespace = true },
   noPrintMetadata: function() { printMetadata = false },
   asm: function() { asm = true },
+  asmPreciseF32: function() { asmPreciseF32 = true },
   last: function() { last = true },
 };
 

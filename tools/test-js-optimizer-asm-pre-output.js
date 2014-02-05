@@ -519,4 +519,23 @@ function _main($argc, $argv) {
  STACKTOP = __stackBase__;
  return $_0 | 0;
 }
+function badf() {
+ var $9 = 0;
+ $9 = $8 | 0;
+ HEAP32[$gep23_asptr >> 2] = $9;
+}
+function badf2() {
+ var $9 = +0;
+ $9 = +$8;
+ HEAPF32[$gep23_asptr >> 2] = $9;
+}
+function fcomp() {
+ if (!($y < $x)) return 5;
+ if (!(5 < $x)) return 5;
+ if (!($y < 5)) return 5;
+ if (($a | 0) >= ($b | 0)) return 5;
+ if (($a | 0) >= 5) return 5;
+ if (5 >= ($b | 0)) return 5;
+ if (5 >= 5) return 5;
+}
 

@@ -474,6 +474,9 @@ def emscript(infile, settings, outfile, libraries=[], compiler_engine=None,
         basic_vars.append('F_BASE_%s' % sig)
         asm_setup += '  var F_BASE_%s = %s;\n' % (sig, 'FUNCTION_TABLE_OFFSET' if settings.get('SIDE_MODULE') else '0') + '\n'
 
+    if '_rand' in exported_implemented_functions or '_srand' in exported_implemented_functions:
+      basic_vars += ['___rand_seed']
+
     asm_runtime_funcs = ['stackAlloc', 'stackSave', 'stackRestore', 'setThrew'] + ['setTempRet%d' % i for i in range(10)]
     # function tables
     function_tables = ['dynCall_' + table for table in last_forwarded_json['Functions']['tables']]
@@ -518,6 +521,7 @@ def emscript(infile, settings, outfile, libraries=[], compiler_engine=None,
       exports = '{ ' + ', '.join(exports) + ' }'
     else:
       exports = '_main'
+
     # calculate globals
     try:
       del forwarded_json['Variables']['globals']['_llvm_global_ctors'] # not a true variable
@@ -733,14 +737,17 @@ def emscript_fast(infile, settings, outfile, libraries=[], compiler_engine=None,
   #   * Run compiler.js on the metadata to emit the shell js code, pre/post-ambles,
   #     JS library dependencies, etc.
 
-  if DEBUG:
-    logging.debug('emscript: llvm backend')
-    t = time.time()
-
   temp_js = temp_files.get('.4.js').name
   backend_compiler = os.path.join(shared.LLVM_ROOT, 'llc')
-  shared.jsrun.timeout_run(subprocess.Popen([backend_compiler, infile, '-march=js', '-filetype=asm', '-o', temp_js], stdout=subprocess.PIPE))
-
+  backend_args = [backend_compiler, infile, '-march=js', '-filetype=asm', '-o', temp_js]
+  if settings['PRECISE_F32']:
+    backend_args += ['-emscripten-precise-f32']
+  if settings['WARN_UNALIGNED']:
+    backend_args += ['-emscripten-warn-unaligned']
+  if DEBUG:
+    logging.debug('emscript: llvm backend: ' + ' '.join(backend_args))
+    t = time.time()
+  shared.jsrun.timeout_run(subprocess.Popen(backend_args, stdout=subprocess.PIPE))
   if DEBUG:
     logging.debug('  emscript: llvm backend took %s seconds' % (time.time() - t))
     t = time.time()
@@ -858,15 +865,13 @@ def emscript_fast(infile, settings, outfile, libraries=[], compiler_engine=None,
       pre = parts[0]
       funcs_js.append(parts[1])
 
-  # calculations on merged forwarded data TODO
-
   # merge forwarded data
   assert settings.get('ASM_JS'), 'fastcomp is asm.js only'
   settings['EXPORTED_FUNCTIONS'] = forwarded_json['EXPORTED_FUNCTIONS']
   all_exported_functions = set(settings['EXPORTED_FUNCTIONS']) # both asm.js and otherwise
   for additional_export in settings['DEFAULT_LIBRARY_FUNCS_TO_INCLUDE']: # additional functions to export from asm, if they are implemented
     all_exported_functions.add('_' + additional_export)
-  exported_implemented_functions = set()
+  exported_implemented_functions = set(metadata['exports'])
   export_bindings = settings['EXPORT_BINDINGS']
   export_all = settings['EXPORT_ALL']
   for key in metadata['implementedFunctions'] + forwarded_json['Functions']['implementedFunctions'].keys(): # XXX perf
@@ -904,12 +909,15 @@ def emscript_fast(infile, settings, outfile, libraries=[], compiler_engine=None,
     else:
       pre_tables = ''
 
+    def unfloat(s):
+      return 'd' if s == 'f' else s # lower float to double for ffis
+
     def make_table(sig, raw):
       i = Counter.i
       Counter.i += 1
       bad = 'b' + str(i)
       params = ','.join(['p%d' % p for p in range(len(sig)-1)])
-      coerced_params = ','.join([shared.JS.make_coercion('p%d', sig[p+1], settings) % p for p in range(len(sig)-1)])
+      coerced_params = ','.join([shared.JS.make_coercion('p%d', unfloat(sig[p+1]), settings) % p for p in range(len(sig)-1)])
       coercions = ';'.join(['p%d = %s' % (p, shared.JS.make_coercion('p%d' % p, sig[p+1], settings)) for p in range(len(sig)-1)]) + ';'
       def make_func(name, code):
         return 'function %s(%s) { %s %s }' % (name, params, coercions, code)
@@ -933,6 +941,8 @@ def emscript_fast(infile, settings, outfile, libraries=[], compiler_engine=None,
           if not call_ident.startswith('_') and not call_ident.startswith('Math_'): call_ident = '_' + call_ident
           code = call_ident + '(' + coerced_params + ')'
           if sig[0] != 'v':
+            # ffis cannot return float
+            if sig[0] == 'f': code = '+' + code
             code = 'return ' + shared.JS.make_coercion(code, sig[0], settings)
           code += ';'
           Counter.pre.append(make_func(item + '__wrapper', code))
@@ -974,6 +984,9 @@ def emscript_fast(infile, settings, outfile, libraries=[], compiler_engine=None,
       for sig in last_forwarded_json['Functions']['tables'].iterkeys():
         basic_vars.append('F_BASE_%s' % sig)
         asm_setup += '  var F_BASE_%s = %s;\n' % (sig, 'FUNCTION_TABLE_OFFSET' if settings.get('SIDE_MODULE') else '0') + '\n'
+
+    if '_rand' in exported_implemented_functions or '_srand' in exported_implemented_functions:
+      basic_vars += ['___rand_seed']
 
     asm_runtime_funcs = ['stackAlloc', 'stackSave', 'stackRestore', 'setThrew'] + ['setTempRet%d' % i for i in range(10)]
     # function tables
