@@ -50,10 +50,14 @@ extern "C" {
  *      return $0 + $1;
  *    }, calc(), otherCalc());
  *
- * Note the {,}
+ * Note the { and }. If you just want to receive an output value
+ * (int or double) but *not* to pass any values, you can use
+ * EM_ASM_INT_V and EM_ASM_DOUBLE_V respectively.
  */
 #define EM_ASM_INT(code, ...) emscripten_asm_const_int(#code, __VA_ARGS__)
 #define EM_ASM_DOUBLE(code, ...) emscripten_asm_const_double(#code, __VA_ARGS__)
+#define EM_ASM_INT_V(code) emscripten_asm_const_int(#code)
+#define EM_ASM_DOUBLE_V(code) emscripten_asm_const_double(#code)
 
 /*
  * Forces LLVM to not dead-code-eliminate a function. Note that
@@ -227,7 +231,14 @@ void emscripten_get_canvas_size(int *width, int *height, int *isFullscreen);
  * absolute time, and is only meaningful in comparison to
  * other calls to this function. The unit is ms.
  */
+#if EMSCRIPTEN
 double emscripten_get_now();
+#else
+#include <time.h>
+double emscripten_get_now() {
+  return (1000*clock())/(double)CLOCKS_PER_SEC;
+}
+#endif
 
 /*
  * Simple random number generation in [0, 1), maps to Math.random().

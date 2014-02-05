@@ -957,7 +957,11 @@ var LibraryGL = {
         usage = 0x88E8; // GL_DYNAMIC_DRAW
         break;
     }
-    GLctx.bufferData(target, HEAPU8.subarray(data, data+size), usage);
+    if (!data) {
+      GLctx.bufferData(target, size, usage);
+    } else {
+      GLctx.bufferData(target, HEAPU8.subarray(data, data+size), usage);
+    }
   },
 
   glBufferSubData__sig: 'viiii',
@@ -2644,7 +2648,7 @@ var LibraryGL = {
             return "float";
         }
 
-        return Abort_NoSupport("Unsupported combiner op: 0x" + op.toString(16));
+        return abort_noSupport("Unsupported combiner op: 0x" + op.toString(16));
       }
 
       function getCurTexUnit() {
@@ -2997,7 +3001,7 @@ var LibraryGL = {
           }
         }
 
-        return Abort_NoSupport("Unsupported TexEnv mode: 0x" + this.mode.toString(16));
+        return abort_noSupport("Unsupported TexEnv mode: 0x" + this.mode.toString(16));
       }
 
       CTexEnv.prototype.genCombinerLines = function CTexEnv_getCombinerLines(isColor, outputVar,
@@ -3512,9 +3516,9 @@ var LibraryGL = {
           switch (pname) {
             case GL_TEXTURE_ENV_COLOR:
               {{{ makeSetValue('param', '0', 'env.envColor[0]', 'float') }}};
-              {{{ makeSetValue('param', '1', 'env.envColor[1]', 'float') }}};
-              {{{ makeSetValue('param', '2', 'env.envColor[2]', 'float') }}};
-              {{{ makeSetValue('param', '3', 'env.envColor[3]', 'float') }}};
+              {{{ makeSetValue('param', '4', 'env.envColor[1]', 'float') }}};
+              {{{ makeSetValue('param', '8', 'env.envColor[2]', 'float') }}};
+              {{{ makeSetValue('param', '12', 'env.envColor[3]', 'float') }}};
               return;
           }
         }
@@ -3602,6 +3606,11 @@ var LibraryGL = {
         GLImmediate.enabledClientAttributes[name] = true;
         GLImmediate.setClientAttribute(name, size, type, 0, GLImmediate.rendererComponentPointer);
         GLImmediate.rendererComponentPointer += size * GL.byteSizeByType[type - GL.byteSizeByTypeRoot];
+#if GL_FFP_ONLY
+        // We can enable the correct attribute stream index immediately here, since the same attribute in each shader
+        // will be bound to this same index.
+        GL.enableVertexAttribArray(name);
+#endif
       } else {
         GLImmediate.rendererComponents[name]++;
       }
@@ -3834,7 +3843,8 @@ var LibraryGL = {
             GLctx.bindAttribLocation(this.program, GLImmediate.VERTEX, 'a_position');
             GLctx.bindAttribLocation(this.program, GLImmediate.COLOR, 'a_color');
             GLctx.bindAttribLocation(this.program, GLImmediate.NORMAL, 'a_normal');
-            for (var i = 0; i < GLImmediate.MAX_TEXTURES; i++) {
+            var maxVertexAttribs = GLctx.getParameter(GLctx.MAX_VERTEX_ATTRIBS);
+            for (var i = 0; i < GLImmediate.MAX_TEXTURES && GLImmediate.TEXTURE0 + i < maxVertexAttribs; i++) {
               GLctx.bindAttribLocation(this.program, GLImmediate.TEXTURE0 + i, 'a_texCoord'+i);
               GLctx.bindAttribLocation(this.program, GLImmediate.TEXTURE0 + i, aTexCoordPrefix+i);
             }
@@ -3861,7 +3871,7 @@ var LibraryGL = {
               this.texCoordLocations[i] = GLctx.getAttribLocation(this.program, aTexCoordPrefix + i);
             }
           }
-
+          this.colorLocation = GLctx.getAttribLocation(this.program, 'a_color');
           if (!useCurrProgram) {
             // Temporarily switch to the program so we can set our sampler uniforms early.
             var prevBoundProg = GLctx.getParameter(GLctx.CURRENT_PROGRAM);
@@ -3873,6 +3883,9 @@ var LibraryGL = {
                 GLctx.uniform1i(texSamplerLoc, texUnitID);
               }
             }
+            // The default color attribute value is not the same as the default for all other attribute streams (0,0,0,1) but (1,1,1,1),
+            // so explicitly set it right at start.
+            GLctx.vertexAttrib4fv(this.colorLocation, [1,1,1,1]);
             GLctx.useProgram(prevBoundProg);
           }
 
@@ -3880,7 +3893,6 @@ var LibraryGL = {
           for (var i = 0; i < GLImmediate.MAX_TEXTURES; i++) {
             this.textureMatrixLocations[i] = GLctx.getUniformLocation(this.program, 'u_textureMatrix' + i);
           }
-          this.colorLocation = GLctx.getAttribLocation(this.program, 'a_color');
           this.normalLocation = GLctx.getAttribLocation(this.program, 'a_normal');
 
           this.modelViewLocation = GLctx.getUniformLocation(this.program, 'u_modelView');

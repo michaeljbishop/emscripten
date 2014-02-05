@@ -1773,6 +1773,8 @@ f.close()
        ['asm', 'eliminate']),
       (path_from_root('tools', 'test-js-optimizer-asm-regs.js'), open(path_from_root('tools', 'test-js-optimizer-asm-regs-output.js')).read(),
        ['asm', 'registerize']),
+      (path_from_root('tools', 'test-js-optimizer-asm-regs-harder.js'), open(path_from_root('tools', 'test-js-optimizer-asm-regs-harder-output.js')).read(),
+       ['asm', 'registerizeHarder']),
       (path_from_root('tools', 'test-js-optimizer-asm-regs-min.js'), open(path_from_root('tools', 'test-js-optimizer-asm-regs-min-output.js')).read(),
        ['asm', 'registerize', 'minifyLocals']),
       (path_from_root('tools', 'test-js-optimizer-asm-pre.js'), open(path_from_root('tools', 'test-js-optimizer-asm-pre-output.js')).read(),
@@ -2321,4 +2323,31 @@ var Module = { print: function(x) { throw '<{(' + x + ')}>' } };
     Popen([PYTHON, EMCC, 'code.cpp', '--pre-js', 'pre.js']).communicate()
     output = run_js(os.path.join(self.get_dir(), 'a.out.js'), stderr=PIPE, full_output=True, engine=NODE_JS)
     assert r'<{(123456789)}>' in output, output
+
+  def test_precompiled_headers(self):
+    self.clear()
+
+    open('header.h', 'w').write('#define X 5\n')
+    Popen([PYTHON, EMCC, '-xc++-header', 'header.h', '-c']).communicate()
+    assert os.path.exists('header.h.gch')
+
+    open('src.cpp', 'w').write(r'''
+#include <stdio.h>
+int main() {
+  printf("|%d|\n", X);
+  return 0;
+}
+''')
+    Popen([PYTHON, EMCC, 'src.cpp', '-include', 'header.h']).communicate()
+
+    output = run_js(self.in_dir('a.out.js'), stderr=PIPE, full_output=True, engine=NODE_JS)
+    assert '|5|' in output, output
+
+    # also verify that the gch is actually used
+    err = Popen([PYTHON, EMCC, 'src.cpp', '-include', 'header.h', '-Xclang', '-print-stats'], stderr=PIPE).communicate()
+    assert '*** PCH/Modules Loaded:\nModule: header.h.gch' in err[1], err[1]
+    # and sanity check it is not mentioned when not
+    try_delete('header.h.gch')
+    err = Popen([PYTHON, EMCC, 'src.cpp', '-include', 'header.h', '-Xclang', '-print-stats'], stderr=PIPE).communicate()
+    assert '*** PCH/Modules Loaded:\nModule: header.h.gch' not in err[1], err[1]
 

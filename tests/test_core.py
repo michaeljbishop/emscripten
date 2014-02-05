@@ -1157,6 +1157,16 @@ class T(RunnerCore): # Short name, to make it more fun to use manually on the co
     src, output = (test_path + s for s in ('.in', '.out'))
     self.do_run_from_file(src, output)
 
+  def test_longjmp_throw(self):
+    if self.run_name == 'asm3': return self.skip('issue 2069') # FIXME
+
+    for disable_throw in [0, 1]:
+      print disable_throw
+      Settings.DISABLE_EXCEPTION_CATCHING = disable_throw
+      test_path = path_from_root('tests', 'core', 'test_longjmp_throw')
+      src, output = (test_path + s for s in ('.cpp', '.out'))
+      self.do_run_from_file(src, output)
+
   def test_setjmp_many(self):
     if os.environ.get('EMCC_FAST_COMPILER') == '1': return self.skip('todo in fastcomp: make MAX_SETJMPS take effect')
 
@@ -1268,10 +1278,12 @@ class T(RunnerCore): # Short name, to make it more fun to use manually on the co
     if self.emcc_args is None: return self.skip('need emcc to add in libcxx properly')
     Settings.DISABLE_EXCEPTION_CATCHING = 0
 
-    test_path = path_from_root('tests', 'core', 'test_exceptions_2')
-    src, output = (test_path + s for s in ('.in', '.out'))
-
-    self.do_run_from_file(src, output)
+    for safe in [0,1]:
+      print safe
+      Settings.SAFE_HEAP = safe
+      test_path = path_from_root('tests', 'core', 'test_exceptions_2')
+      src, output = (test_path + s for s in ('.in', '.out'))
+      self.do_run_from_file(src, output)
 
   def test_exceptions_white_list(self):
     if os.environ.get('EMCC_FAST_COMPILER') == '1': return self.skip('todo in fastcomp')
@@ -2808,6 +2820,46 @@ def process(filename):
       '''
     self.do_run(src, 'Constructing main object.\nConstructing lib object.\n',
                 post_build=self.dlfcn_post_build)
+
+  def test_dlfcn_i64(self):
+    if not self.can_dlfcn(): return
+    if not Settings.ASM_JS: return self.skip('TODO')
+
+    self.prep_dlfcn_lib()
+    Settings.EXPORTED_FUNCTIONS = ['_foo']
+    lib_src = '''
+      int foo(int x) {
+        return (long long)x / (long long)1234;
+      }
+      '''
+    dirname = self.get_dir()
+    filename = os.path.join(dirname, 'liblib.c')
+    self.build(lib_src, dirname, filename)
+    shutil.move(filename + '.o.js', os.path.join(dirname, 'liblib.so'))
+
+    self.prep_dlfcn_main()
+    Settings.EXPORTED_FUNCTIONS = ['_main']
+    src = r'''
+      #include <stdio.h>
+      #include <stdlib.h>
+      #include <dlfcn.h>
+
+      typedef int (*intfunc)(int);
+
+      void *p;
+
+      int main() {
+        p = malloc(1024);
+        void *lib_handle = dlopen("liblib.so", 0);
+        printf("load %p\n", lib_handle);
+        intfunc x = (intfunc)dlsym(lib_handle, "foo");
+        printf("foo func %p\n", x);
+        if (p == 0) return 1;
+        printf("|%d|\n", x(81234567));
+        return 0;
+      }
+      '''
+    self.do_run(src, '|65830|', post_build=self.dlfcn_post_build)
 
   def test_dlfcn_qsort(self):
     if not self.can_dlfcn(): return
@@ -5954,7 +6006,7 @@ def process(filename):
   def test_debug(self):
     if '-g' not in Building.COMPILER_TEST_OPTS: Building.COMPILER_TEST_OPTS.append('-g')
     if self.emcc_args is not None:
-      if '-O1' in self.emcc_args or '-O2' in self.emcc_args: return self.skip('optimizations remove LLVM debug info')
+      if '-O1' in self.emcc_args or '-O2' in self.emcc_args or '-O3' in self.emcc_args: return self.skip('optimizations remove LLVM debug info')
 
     src = '''
       #include <stdio.h>
@@ -6266,6 +6318,9 @@ def process(filename):
       Settings.CORRECT_SIGNS = 1 # To be correct here, we need sign corrections as well
       self.do_run(src.replace('TYPE', 'unsigned int'), '*2147483645**2**-5**5*')
       Settings.CORRECT_SIGNS = 0
+
+  def test_float_literals(self):
+    self.do_run_from_file(path_from_root('tests', 'test_float_literals.cpp'), path_from_root('tests', 'test_float_literals.out'))
 
   def test_exit_status(self):
     if self.emcc_args is None: return self.skip('need emcc')

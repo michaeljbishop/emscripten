@@ -580,6 +580,45 @@ If manually bisecting:
     shutil.rmtree(os.path.join(self.get_dir(), 'subdirr'))
     self.run_browser('page.html', 'You should see two cool numbers', '/report_result?1')
 
+  def test_custom_file_package_url(self):
+    # a few files inside a directory
+    self.clear()
+    os.makedirs(os.path.join(self.get_dir(), 'subdirr'));
+    os.makedirs(os.path.join(self.get_dir(), 'cdn'));
+    open(os.path.join(self.get_dir(), 'subdirr', 'data1.txt'), 'w').write('''1214141516171819''')
+    # change the file package base dir to look in a "cdn". note that normally you would add this in your own custom html file etc., and not by
+    # modifying the existing shell in this manner
+    open(self.in_dir('shell.html'), 'w').write(open(path_from_root('src', 'shell.html')).read().replace('var Module = {', 'var Module = { filePackagePrefixURL: "cdn/", '))
+    open(os.path.join(self.get_dir(), 'main.cpp'), 'w').write(self.with_report_result(r'''
+      #include <stdio.h>
+      #include <string.h>
+      #include <emscripten.h>
+      int main() {
+        char buf[17];
+
+        FILE *f = fopen("subdirr/data1.txt", "r");
+        fread(buf, 1, 16, f);
+        buf[16] = 0;
+        fclose(f);
+        printf("|%s|\n", buf);
+        int result = !strcmp("1214141516171819", buf);
+
+        REPORT_RESULT();
+        return 0;
+      }
+    '''))
+
+    def test():
+      Popen([PYTHON, EMCC, os.path.join(self.get_dir(), 'main.cpp'), '--shell-file', 'shell.html', '--preload-file', 'subdirr/data1.txt', '-o', 'test.html']).communicate()
+      shutil.move('test.data', os.path.join('cdn', 'test.data'))
+      self.run_browser('test.html', '', '/report_result?1')
+
+    test()
+
+    # TODO: CORS, test using a full url for filePackagePrefixURL
+    #open(self.in_dir('shell.html'), 'w').write(open(path_from_root('src', 'shell.html')).read().replace('var Module = {', 'var Module = { filePackagePrefixURL: "http:/localhost:8888/cdn/", '))
+    #test()
+
   def test_compressed_file(self):
     open(os.path.join(self.get_dir(), 'datafile.txt'), 'w').write('compress this please' + (2000*'.'))
     open(os.path.join(self.get_dir(), 'datafile2.txt'), 'w').write('moar' + (100*'!'))
@@ -683,6 +722,9 @@ If manually bisecting:
 
   def test_sdl_canvas(self):
     self.btest('sdl_canvas.c', expected='1', args=['-s', 'LEGACY_GL_EMULATION=1'])
+    # some extra coverage
+    self.btest('sdl_canvas.c', expected='1', args=['-s', 'LEGACY_GL_EMULATION=1', '-s', '-O0', 'SAFE_HEAP=1'])
+    self.btest('sdl_canvas.c', expected='1', args=['-s', 'LEGACY_GL_EMULATION=1', '-s', '-O2', 'SAFE_HEAP=1'])
 
   def test_sdl_canvas_proxy(self):
     def post():
@@ -1543,6 +1585,9 @@ keydown(100);keyup(100); // trigger the end
   def test_cube_explosion(self):
     self.btest('cube_explosion.c', reference='cube_explosion.png', args=['-s', 'LEGACY_GL_EMULATION=1'])
 
+  def test_glgettexenv(self):
+    self.btest('glgettexenv.c', args=['-s', 'LEGACY_GL_EMULATION=1'], expected=['1'])
+
   def test_sdl_canvas_blank(self):
     self.btest('sdl_canvas_blank.c', reference='sdl_canvas_blank.png')
 
@@ -1598,6 +1643,10 @@ keydown(100);keyup(100); // trigger the end
   def test_s3tc(self):
     shutil.copyfile(path_from_root('tests', 'screenshot.dds'), os.path.join(self.get_dir(), 'screenshot.dds'))
     self.btest('s3tc.c', reference='s3tc.png', args=['--preload-file', 'screenshot.dds', '-s', 'LEGACY_GL_EMULATION=1'])
+
+  def test_s3tc_ffp_only(self):
+    shutil.copyfile(path_from_root('tests', 'screenshot.dds'), os.path.join(self.get_dir(), 'screenshot.dds'))
+    self.btest('s3tc.c', reference='s3tc.png', args=['--preload-file', 'screenshot.dds', '-s', 'LEGACY_GL_EMULATION=1', '-s', 'GL_FFP_ONLY=1'])
 
   def test_s3tc_crunch(self):
     shutil.copyfile(path_from_root('tests', 'ship.dds'), 'ship.dds')
@@ -1764,3 +1813,5 @@ Module["preRun"].push(function () {
 
     self.btest('doublestart.c', args=['--pre-js', 'pre.js', '-o', 'test.html'], expected='1')
 
+  def test_html5(self):
+    self.btest(path_from_root('tests', 'test_html5.c'), expected='0')
