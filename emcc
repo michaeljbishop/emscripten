@@ -47,16 +47,18 @@ emcc can be influenced by a few environment variables:
   EMMAKEN_COMPILER - The compiler to be used, if you don't want the default clang.
 '''
 
-import os, sys, shutil, tempfile, subprocess, shlex, time, re, logging
+import os, sys, shutil, tempfile, subprocess, shlex, time, re, logging, json
 from subprocess import PIPE, STDOUT
-from tools import shared, jsrun
+from tools import shared, jsrun, system_libs
 from tools.shared import Compression, execute, suffix, unsuffixed, unsuffixed_basename, WINDOWS
 from tools.response_file import read_response_file
 
 # endings = dot + a suffix, safe to test by  filename.endswith(endings)
 C_ENDINGS = ('.c', '.C')
 CXX_ENDINGS = ('.cpp', '.cxx', '.cc', '.CPP', '.CXX', '.CC')
-SOURCE_ENDINGS = C_ENDINGS + CXX_ENDINGS + ('.m', '.mm')
+OBJC_ENDINGS = ('.m',)
+OBJCXX_ENDINGS = ('.mm',)
+SOURCE_ENDINGS = C_ENDINGS + CXX_ENDINGS + OBJC_ENDINGS + OBJCXX_ENDINGS
 BITCODE_ENDINGS = ('.bc', '.o', '.obj')
 DYNAMICLIB_ENDINGS = ('.dylib', '.so', '.dll')
 STATICLIB_ENDINGS = ('.a',)
@@ -274,21 +276,6 @@ Options that are modified or new in %s include:
                            Note: Closure is only run if js opts are being
                            done (-O2 or above, or --js-opts 1).
 
-  --js-transform <cmd>     <cmd> will be called on the generated code
-                           before it is optimized. This lets you modify
-                           the JavaScript, for example adding some code
-                           or removing some code, in a way that those
-                           modifications will be optimized together with
-                           the generated code properly. <cmd> will be
-                           called with the filename of the generated
-                           code as a parameter; to modify the code, you
-                           can read the original data and then append to
-                           it or overwrite it with the modified data.
-                           <cmd> is interpreted as a space-separated
-                           list of arguments, for example, <cmd> of
-                           "python processor.py" will cause a python
-                           script to be run.
-
   --pre-js <file>          A file whose contents are added before the
                            generated code. This is done *before*
                            optimization, so it will be minified
@@ -310,6 +297,13 @@ Options that are modified or new in %s include:
                            reading that same path, dir/file.dat.
                            If a directory is passed here, its entire
                            contents will be embedded.
+
+                           Note: Embedding files is much less
+                                 efficient than preloading them. You
+                                 should only use it for small amounts
+                                 of small files. Instead, use
+                                 --preload-file which emits efficient
+                                 binary data.
 
   --preload-file <name>    A file to preload before running the
                            compiled code asynchronously. Otherwise
@@ -340,6 +334,16 @@ Options that are modified or new in %s include:
                            --embed-file and --preload-file
                            wildcard is supported
 
+  --shell-file <path>      The path name to a skeleton HTML file used
+                           when generating HTML output. The shell file
+                           used needs to have this token inside it:
+                           {{{ SCRIPT }}}
+                           (see src/shell.html and
+                                src/shell_minimal.html for examples)
+                           Note that this argument is ignored if a
+                           target other than HTML is specified using
+                           the -o option.
+
   --compression <codec>    **THIS OPTION IS DEPRECATED**
 
                            Compress both the compiled code and embedded/
@@ -363,6 +367,21 @@ Options that are modified or new in %s include:
 
   --minify 0               Identical to -g1
 
+  --js-transform <cmd>     <cmd> will be called on the generated code
+                           before it is optimized. This lets you modify
+                           the JavaScript, for example adding some code
+                           or removing some code, in a way that those
+                           modifications will be optimized together with
+                           the generated code properly. <cmd> will be
+                           called with the filename of the generated
+                           code as a parameter; to modify the code, you
+                           can read the original data and then append to
+                           it or overwrite it with the modified data.
+                           <cmd> is interpreted as a space-separated
+                           list of arguments, for example, <cmd> of
+                           "python processor.py" will cause a python
+                           script to be run.
+
   --split <size>           Splits the resulting javascript file into pieces
                            to ease debugging. This option only works if
                            Javascript is generated (target -o <name>.js).
@@ -384,6 +403,9 @@ Options that are modified or new in %s include:
                               The main file resides in the base directory and
                               has the suffix ".js".
 
+                           Note: this option is deprecated (modern JS debuggers
+                                 should work ok even on large files)
+
   --bind                   Compiles the source code using the "embind"
                            bindings approach, which connects C/C++ and JS.
 
@@ -395,15 +417,6 @@ Options that are modified or new in %s include:
                            which allows the build system to proceed without
                            errors. However, you will need to manually
                            link to the shared libraries later on yourself.
-
-  --shell-file <path>      The path name to a skeleton HTML file used
-                           when generating HTML output. The shell file
-                           used needs to have this token inside it:
-                           {{{ SCRIPT }}}
-                           (see src/shell.html for an example)
-                           Note that this argument is ignored if a
-                           target other than HTML is specified using
-                           the -o option.
 
   --js-library <lib>       A JavaScript library to use in addition to
                            those in Emscripten's src/library_*
@@ -704,7 +717,7 @@ use_cxx = True
 for i in range(1, len(sys.argv)):
   arg = sys.argv[i]
   if not arg.startswith('-'):
-    if arg.endswith(('.c','.m')):
+    if arg.endswith(C_ENDINGS + OBJC_ENDINGS):
       use_cxx = False
 
 if '-M' in sys.argv or '-MM' in sys.argv:
@@ -841,7 +854,11 @@ try:
         requested_level = 2
         settings_changes.append('INLINING_LIMIT=50')
       opt_level = validate_arg_level(requested_level, 3, 'Invalid optimization level: ' + newargs[i])
-      newargs[i] = ''
+      # We leave the -O option in place so that the clang front-end runs in that
+      # optimization mode, but we disable the actual optimization passes, as we'll
+      # run them seperately.
+      newargs.append('-mllvm')
+      newargs.append('-disable-llvm-optzns');
     elif newargs[i].startswith('--js-opts'):
       check_bad_eq(newargs[i])
       js_opts = eval(newargs[i+1])
@@ -1186,7 +1203,7 @@ try:
   fastcomp = os.environ.get('EMCC_FAST_COMPILER') == '1'
 
   if fastcomp:
-    shared.Settings.ASM_JS = 1
+    shared.Settings.ASM_JS = 1 if opt_level > 0 else 2
     assert shared.Settings.ALLOW_MEMORY_GROWTH == 0, 'memory growth not supported in fastcomp yet'
     assert shared.Settings.UNALIGNED_MEMORY == 0, 'forced unaligned memory not supported in fastcomp'
     assert shared.Settings.CHECK_HEAP_ALIGN == 0, 'check heap align not supported in fastcomp yet'
@@ -1194,12 +1211,12 @@ try:
     assert shared.Settings.RESERVED_FUNCTION_POINTERS == 0, 'reserved function pointers not supported in fastcomp'
     assert shared.Settings.ASM_HEAP_LOG == 0, 'asm heap log not supported in fastcomp'
     assert shared.Settings.LABEL_DEBUG == 0, 'label debug not supported in fastcomp'
-    assert shared.Settings.LEGACY_GL_EMULATION == 0, 'legacy gl emulation not supported in fastcomp'
     assert shared.Settings.EXECUTION_TIMEOUT == -1, 'execution timeout not supported in fastcomp'
     assert shared.Settings.NAMED_GLOBALS == 0, 'named globals not supported in fastcomp'
     assert shared.Settings.PGO == 0, 'pgo not supported in fastcomp'
     assert shared.Settings.TARGET_LE32 == 1, 'fastcomp requires le32'
     assert shared.Settings.USE_TYPED_ARRAYS == 2, 'fastcomp assumes ta2'
+    assert not split_js_file, '--split-js is deprecated and not supported in fastcomp'
     assert not bind, 'embind not supported in fastcomp yet'
     if jcache:
       logging.warning('jcache is not supported in fastcomp (you should not need it anyhow), disabling')
@@ -1401,374 +1418,12 @@ try:
 
   logging.debug('will generate JavaScript')
 
-  extra_files_to_link = []
-
   if not LEAVE_INPUTS_RAW and \
-     not shared.Settings.BUILD_AS_SHARED_LIB == 2 and \
+     not shared.Settings.BUILD_AS_SHARED_LIB and \
      not shared.Settings.SIDE_MODULE: # shared libraries/side modules link no C libraries, need them in parent
-
-    # Check if we need to include some libraries that we compile. (We implement libc ourselves in js, but
-    # compile a malloc implementation and stdlibc++.)
-
-    def read_symbols(path, exclude=None):
-      symbols = map(lambda line: line.strip().split(' ')[1], open(path).readlines())
-      if exclude:
-        symbols = filter(lambda symbol: symbol not in exclude, symbols)
-      return set(symbols)
-
-    lib_opts = ['-O2']
-
-    # XXX We also need to add libc symbols that use malloc, for example strdup. It's very rare to use just them and not
-    #     a normal malloc symbol (like free, after calling strdup), so we haven't hit this yet, but it is possible.
-    libc_symbols = read_symbols(shared.path_from_root('system', 'lib', 'libc.symbols'))
-    sdl_symbols = read_symbols(shared.path_from_root('system', 'lib', 'sdl.symbols'))
-    libcextra_symbols = read_symbols(shared.path_from_root('system', 'lib', 'libcextra.symbols'))
-    libcxx_symbols = read_symbols(shared.path_from_root('system', 'lib', 'libcxx', 'symbols'), exclude=libc_symbols)
-    libcxxabi_symbols = read_symbols(shared.path_from_root('system', 'lib', 'libcxxabi', 'symbols'), exclude=libc_symbols)
-
-    # XXX we should disable EMCC_DEBUG when building libs, just like in the relooper
-
-    def build_libc(lib_filename, files):
-      o_s = []
-      prev_cxx = os.environ.get('EMMAKEN_CXX')
-      if prev_cxx: os.environ['EMMAKEN_CXX'] = ''
-      musl_internal_includes = shared.path_from_root('system', 'lib', 'libc', 'musl', 'src', 'internal')
-      for src in files:
-        o = in_temp(os.path.basename(src) + '.o')
-        execute([shared.PYTHON, shared.EMCC, shared.path_from_root('system', 'lib', src), '-o', o, '-I', musl_internal_includes] + lib_opts, stdout=stdout, stderr=stderr)
-        o_s.append(o)
-      if prev_cxx: os.environ['EMMAKEN_CXX'] = prev_cxx
-      shared.Building.link(o_s, in_temp(lib_filename))
-      return in_temp(lib_filename)
-
-    def build_libcxx(src_dirname, lib_filename, files):
-      o_s = []
-      for src in files:
-        o = in_temp(src + '.o')
-        srcfile = shared.path_from_root(src_dirname, src)
-        execute([shared.PYTHON, shared.EMXX, srcfile, '-o', o, '-std=c++11'] + lib_opts, stdout=stdout, stderr=stderr)
-        o_s.append(o)
-      shared.Building.link(o_s, in_temp(lib_filename))
-      return in_temp(lib_filename)
-
-    # libc
-    def create_libc():
-      logging.debug(' building libc for cache')
-      libc_files = [
-        'dlmalloc.c',
-        os.path.join('libcxx', 'new.cpp'),
-      ]
-      musl_files = [
-        ['internal', [
-         'floatscan.c',
-         'shgetc.c',
-        ]],
-        ['math', [
-         'scalbn.c',
-         'scalbnl.c',
-        ]],
-        ['stdio', [
-         '__overflow.c',
-         '__toread.c',
-         '__towrite.c',
-         '__uflow.c',
-        ]],
-        ['stdlib', [
-         'atof.c',
-         'strtod.c',
-        ]]
-      ]
-      for directory, sources in musl_files:
-        libc_files += [os.path.join('libc', 'musl', 'src', directory, source) for source in sources]
-      return build_libc('libc.bc', libc_files)
-
-    def apply_libc(need):
-      # libc needs some sign correction. # If we are in mode 0, switch to 2. We will add our lines
-      try:
-        if shared.Settings.CORRECT_SIGNS == 0: raise Exception('we need to change to 2')
-      except: # we fail if equal to 0 - so we need to switch to 2 - or if CORRECT_SIGNS is not even in Settings
-        shared.Settings.CORRECT_SIGNS = 2
-      if shared.Settings.CORRECT_SIGNS == 2:
-        shared.Settings.CORRECT_SIGNS_LINES = [shared.path_from_root('src', 'dlmalloc.c') + ':' + str(i+4) for i in [4816, 4191, 4246, 4199, 4205, 4235, 4227]]
-      # If we are in mode 1, we are correcting everything anyhow. If we are in mode 3, we will be corrected
-      # so all is well anyhow too.
-      return True
-
-    # libcextra
-    def create_libcextra():
-      logging.debug('building libcextra for cache')
-      musl_files = [
-         ['ctype', [
-          'iswalnum.c',
-          'iswalpha.c',
-          'iswblank.c',
-          'iswcntrl.c',
-          'iswctype.c',
-          'iswdigit.c',
-          'iswgraph.c',
-          'iswlower.c',
-          'iswprint.c',
-          'iswpunct.c',
-          'iswspace.c',
-          'iswupper.c',
-          'iswxdigit.c',
-          'towctrans.c',
-          'wcswidth.c',
-          'wctrans.c',
-          'wcwidth.c',
-         ]],
-         ['internal', [
-          'intscan.c',
-         ]],
-         ['legacy', [
-          'err.c',
-         ]],
-         ['locale', [
-          'iconv.c',
-          'iswalnum_l.c',
-          'iswalpha_l.c',
-          'iswblank_l.c',
-          'iswcntrl_l.c',
-          'iswctype_l.c',
-          'iswdigit_l.c',
-          'iswgraph_l.c',
-          'iswlower_l.c',
-          'iswprint_l.c',
-          'iswpunct_l.c',
-          'iswspace_l.c',
-          'iswupper_l.c',
-          'iswxdigit_l.c',
-          'strcasecmp_l.c',
-          'strfmon.c',
-          'strncasecmp_l.c',
-          'strxfrm.c',
-          'towctrans_l.c',
-          'towlower_l.c',
-          'towupper_l.c',
-          'wcscoll.c',
-          'wcscoll_l.c',
-          'wcsxfrm.c',
-          'wcsxfrm_l.c',
-          'wctrans_l.c',
-          'wctype_l.c',
-         ]],
-         ['math', [
-          '__cos.c',
-          '__cosdf.c',
-          '__sin.c',
-          '__sindf.c',
-          'ilogb.c',
-          'ilogbf.c',
-          'ilogbl.c',
-          'ldexp.c',
-          'ldexpf.c',
-          'ldexpl.c',
-          'logb.c',
-          'logbf.c',
-          'logbl.c',
-          'lgamma.c',
-          'lgamma_r.c',
-          'lgammaf.c',
-          'lgammaf_r.c',
-          'lgammal.c',
-          'scalbnf.c',
-          'signgam.c',
-          'tgamma.c',
-          'tgammaf.c',
-          'tgammal.c'
-         ]],
-         ['misc', [
-          'getopt.c',
-          'getopt_long.c',
-         ]],
-         ['multibyte', [
-          'btowc.c',
-          'mblen.c',
-          'mbrlen.c',
-          'mbrtowc.c',
-          'mbsinit.c',
-          'mbsnrtowcs.c',
-          'mbsrtowcs.c',
-          'mbstowcs.c',
-          'mbtowc.c',
-          'wcrtomb.c',
-          'wcsnrtombs.c',
-          'wcsrtombs.c',
-          'wcstombs.c',
-          'wctob.c',
-          'wctomb.c',
-         ]],
-         ['regex', [
-          'fnmatch.c',
-          'regcomp.c',
-          'regerror.c',
-          'regexec.c',
-          'tre-mem.c',
-         ]],
-         ['stdio', [
-          'fwprintf.c',
-          'swprintf.c',
-          'vfwprintf.c',
-          'vswprintf.c',
-          'vwprintf.c',
-          'wprintf.c',
-          'fputwc.c',
-          'fputws.c',
-         ]],
-         ['stdlib', [
-           'ecvt.c',
-           'fcvt.c',
-           'gcvt.c',
-           'wcstod.c',
-           'wcstol.c',
-         ]],
-         ['string', [
-           'memccpy.c',
-           'memmem.c',
-           'mempcpy.c',
-           'memrchr.c',
-           'strcasestr.c',
-           'strchrnul.c',
-           'strlcat.c',
-           'strlcpy.c',
-           'strsep.c',
-           'strverscmp.c',
-           'wcpcpy.c',
-           'wcpncpy.c',
-           'wcscasecmp.c',
-           'wcscasecmp_l.c',
-           'wcscat.c',
-           'wcschr.c',
-           'wcscmp.c',
-           'wcscpy.c',
-           'wcscspn.c',
-           'wcsdup.c',
-           'wcslen.c',
-           'wcsncasecmp.c',
-           'wcsncasecmp_l.c',
-           'wcsncat.c',
-           'wcsncmp.c',
-           'wcsncpy.c',
-           'wcsnlen.c',
-           'wcspbrk.c',
-           'wcsrchr.c',
-           'wcsspn.c',
-           'wcsstr.c',
-           'wcstok.c',
-           'wcswcs.c',
-           'wmemchr.c',
-           'wmemcmp.c',
-           'wmemcpy.c',
-           'wmemmove.c',
-           'wmemset.c',
-         ]]
-      ]
-      libcextra_files = []
-      for directory, sources in musl_files:
-        libcextra_files += [os.path.join('libc', 'musl', 'src', directory, source) for source in sources]
-      return build_libc('libcextra.bc', libcextra_files)
-
-    # libcxx
-    def create_libcxx():
-      logging.debug('building libcxx for cache')
-      libcxx_files = [
-        'algorithm.cpp',
-        'condition_variable.cpp',
-        'future.cpp',
-        'iostream.cpp',
-        'memory.cpp',
-        'random.cpp',
-        'stdexcept.cpp',
-        'system_error.cpp',
-        'utility.cpp',
-        'bind.cpp',
-        'debug.cpp',
-        'hash.cpp',
-        'mutex.cpp',
-        'string.cpp',
-        'thread.cpp',
-        'valarray.cpp',
-        'chrono.cpp',
-        'exception.cpp',
-        'ios.cpp',
-        'locale.cpp',
-        'regex.cpp',
-        'strstream.cpp'
-      ]
-      return build_libcxx(os.path.join('system', 'lib', 'libcxx'), 'libcxx.bc', libcxx_files)
-
-    def apply_libcxx(need):
-      assert shared.Settings.QUANTUM_SIZE == 4, 'We do not support libc++ with QUANTUM_SIZE == 1'
-      # libcxx might need corrections, so turn them all on. TODO: check which are actually needed
-      shared.Settings.CORRECT_SIGNS = shared.Settings.CORRECT_OVERFLOWS = shared.Settings.CORRECT_ROUNDINGS = 1
-      #logging.info('using libcxx turns on CORRECT_* options')
-      return True
-
-    # libcxxabi - just for dynamic_cast for now
-    def create_libcxxabi():
-      logging.debug('building libcxxabi for cache')
-      libcxxabi_files = [
-        'typeinfo.cpp',
-        'private_typeinfo.cpp'
-      ]
-      return build_libcxx(os.path.join('system', 'lib', 'libcxxabi', 'src'), 'libcxxabi.bc', libcxxabi_files)
-
-    def apply_libcxxabi(need):
-      assert shared.Settings.QUANTUM_SIZE == 4, 'We do not support libc++abi with QUANTUM_SIZE == 1'
-      #logging.info('using libcxxabi, this may need CORRECT_* options')
-      #shared.Settings.CORRECT_SIGNS = shared.Settings.CORRECT_OVERFLOWS = shared.Settings.CORRECT_ROUNDINGS = 1
-      return True
-
-    # SDL. We include code that demands malloc/free if not already required, so we have proper malloc/free from JS SDL code.
-    # Note that the Force instance here can be optimized out, but we still export malloc/free, so they will be kept alive.
-    def create_sdl():
-      return build_libcxx(os.path.join('system', 'lib'), 'sdl.bc', ['sdl.cpp'])
-
-    def apply_sdl(need):
-      return 'SDL_Init' in all_needed and ('malloc' not in all_needed or 'free' not in all_needed)
-
-    # Settings this in the environment will avoid checking dependencies and make building big projects a little faster
-    # 1 means include everything; otherwise it can be the name of a lib (libcxx, etc.)
-    force = os.environ.get('EMCC_FORCE_STDLIBS')
-    force_all = force == '1'
-
-    # Scan symbols
-    all_needed = set()
-    symbolses = map(lambda temp_file: shared.Building.llvm_nm(temp_file), temp_files)
-    for symbols in symbolses:
-      all_needed.update(symbols.undefs)
-    for symbols in symbolses:
-      all_needed.difference_update(symbols.defs)
-
-    # Go over libraries to figure out which we must include
-    # If we have libcxx, we must force inclusion of libc, since libcxx uses new internally. Note: this is kind of hacky.
-    has = need = None
-    for name, create, apply_, library_symbols in [('libcxx',    create_libcxx,    apply_libcxx,    libcxx_symbols),
-                                                  ('libcextra', create_libcextra, lambda x: True,  libcextra_symbols),
-                                                  ('libcxxabi', create_libcxxabi, apply_libcxxabi, libcxxabi_symbols),
-                                                  ('sdl',       create_sdl,       apply_sdl,       sdl_symbols),
-                                                  ('libc',      create_libc,      apply_libc,      libc_symbols)]:
-      force_this = force_all or force == name
-      if not force_this:
-        need = set()
-        has = set()
-        for symbols in symbolses:
-          for library_symbol in library_symbols:
-            if library_symbol in symbols.undefs:
-              need.add(library_symbol)
-            if library_symbol in symbols.defs:
-              has.add(library_symbol)
-        for haz in has: # remove symbols that are supplied by another of the inputs
-          if haz in need:
-            need.remove(haz)
-        if shared.Settings.VERBOSE: logging.debug('considering %s: we need %s and have %s' % (name, str(need), str(has)))
-      if force_this or len(need) > 0:
-        force_all = True
-        if apply_(need):
-          # We need to build and link the library in
-          logging.debug('including %s' % name)
-          libfile = shared.Cache.get(name, create)
-          extra_files_to_link.append(libfile)
+    extra_files_to_link = system_libs.calculate(temp_files, in_temp, stdout, stderr)
+  else:
+    extra_files_to_link = []
 
   log_time('calculate system libraries')
 
@@ -1962,8 +1617,9 @@ try:
   # It is useful to run several js optimizer passes together, to save on unneeded unparsing/reparsing
   js_optimizer_queue = []
   js_optimizer_extra_info = {}
+  js_optimizer_queue_history = []
   def flush_js_optimizer_queue():
-    global final, js_optimizer_queue, js_optimizer_extra_info
+    global final, js_optimizer_queue, js_optimizer_extra_info, js_optimizer_queue_history
     if len(js_optimizer_extra_info) == 0:
       js_optimizer_extra_info = None
     if len(js_optimizer_queue) > 0 and not(not shared.Settings.ASM_JS and len(js_optimizer_queue) == 1 and js_optimizer_queue[0] == 'last'):
@@ -1990,6 +1646,7 @@ try:
           final = shared.Building.js_optimizer(final, passes, jcache, debug_level >= 4, js_optimizer_extra_info)
           js_transform_tempfiles.append(final)
           save_intermediate(name)
+      js_optimizer_queue_history += js_optimizer_queue
       js_optimizer_queue = []
     js_optimizer_extra_info = {}
 
@@ -2015,6 +1672,8 @@ try:
         js_optimizer_queue += ['aggressiveVariableElimination']
 
       js_optimizer_queue += ['simplifyExpressions']
+
+      if opt_level >= 3 and shared.Settings.PRECISE_F32: js_optimizer_queue += ['optimizeFrounds']
 
   if closure and not shared.Settings.ASM_JS:
     flush_js_optimizer_queue()
@@ -2079,36 +1738,73 @@ try:
       if debug_level >= 4:
         generate_source_map(target)
       shutil.move(final, js_target)
-      if 1:
+      need_mods = shared.Settings.PRECISE_F32 == 2
+      if not need_mods:
         # Non-modifiable code, just load the code directly
         script_tag = '''<script async type="text/javascript" src="%s"></script>''' % base_js_target
       else:
         # Potentially-modifiable code, load as text, modify, then execute. This lets you
         # patch the code on the client machine right before it is executed, perhaps based
-        # on information about the client. For example,
-        #   code = code.replace(/Math_fround\(/g, '(');
-        # could be used to remove Math.fround optimization (in an unminified build), if
-        # the client does not support Math.fround natively.
-        code = '''
-// Load the code as text, and execute it asynchronously. This keeps everything
-// async and responsive, while also making it possible to modify the code on
-// the client, if necessary.
-var codeXHR = new XMLHttpRequest();
-codeXHR.open('GET', '%s', true);
-codeXHR.onload = function() {
-  var code = codeXHR.responseText;
-  var blob = new Blob([code], { type: 'text/javascript' });
-  codeXHR = null;
-  var src = URL.createObjectURL(blob);
+        # on information about the client.
+        checks = []
+        mods = []
+        if shared.Settings.PRECISE_F32 == 2:
+          checks.append('!Math.fround')
+          if 'minifyNames' not in js_optimizer_queue_history:
+            # simple dumb replace
+            mods.append('''
+console.log('optimizing out Math.fround calls');
+code = code.replace(/Math_fround\(/g, '(').replace("'use asm'", "'almost asm'")
+''')
+          else:
+            # minified, not quite so simple - TODO
+            mods.append('''
+try {
+  console.log('optimizing out Math.fround calls');
+  var m = /var ([^=]+)=global\.Math\.fround;/.exec(code);
+  var minified = m[1];
+  if (!minified) throw 'fail';
+  var startAsm = code.indexOf('// EMSCRIPTEN_START_FUNCS');
+  var endAsm = code.indexOf('// EMSCRIPTEN_END_FUNCS');
+  var asm = code.substring(startAsm, endAsm);
+  do {
+    var moar = false; // we need to re-do, as x(x( will not be fixed
+    asm = asm.replace(new RegExp('[^a-zA-Z0-9\\\\$\\\\_]' + minified + '\\\\(', 'g'), function(s) { moar = true; return s[0] + '(' });
+  } while (moar);
+  code = code.substring(0, startAsm) + asm + code.substring(endAsm);
+  code = code.replace("'use asm'", "'almost asm'");
+} catch(e) { console.log('failed to optimize out Math.fround calls ' + e) }
+''')
+
+        fixes = ''
+        for i in range(len(checks)):
+          fixes += 'if (' + checks[i] + ') { ' + mods[i] + ' }\n'
+
+        # if all the checks are negative, just emit a script tag normally, that's better.
+        # otherwise, do an xhr to get the code as text, modify, and load asynchronously
+        code = 'if (!(' + ' || '.join(checks) + ''')) {
   var script = document.createElement('script');
-  script.src = URL.createObjectURL(blob);
-  script.onload = function() {
-    URL.revokeObjectURL(script.src);
-  };
+  script.src = "''' + base_js_target + '''";
   document.body.appendChild(script);
-};
-codeXHR.send(null);
-''' % base_js_target
+} else {
+  var codeXHR = new XMLHttpRequest();
+  codeXHR.open('GET', '%s', true);
+  codeXHR.onload = function() {
+    var code = codeXHR.responseText;
+    %s
+    var blob = new Blob([code], { type: 'text/javascript' });
+    codeXHR = null;
+    var src = URL.createObjectURL(blob);
+    var script = document.createElement('script');
+    script.src = URL.createObjectURL(blob);
+    script.onload = function() {
+      URL.revokeObjectURL(script.src);
+    };
+    document.body.appendChild(script);
+  };
+  codeXHR.send(null);
+}
+''' % (base_js_target, fixes)
         script_tag = '''<script>%s</script>''' % code
       html.write(shell.replace('{{{ SCRIPT }}}', script_tag))
     else:

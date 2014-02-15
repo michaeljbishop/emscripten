@@ -224,6 +224,7 @@ function JSify(data, functionsOnly) {
 
   // globalVariable
   function globalVariableHandler(item) {
+
     function needsPostSet(value) {
       if (typeof value !== 'string') return false;
       // (' is ok, as it is something we can indexize later into a concrete int: ('{{ FI_ ...
@@ -274,7 +275,9 @@ function JSify(data, functionsOnly) {
       constant = Runtime.alignMemory(calcAllocatedSize(item.type));
     } else {
       if (item.external) {
-        if (Runtime.isNumberType(item.type) || isPointerType(item.type)) {
+        if (LibraryManager.library[item.ident.slice(1)]) {
+          constant = LibraryManager.library[item.ident.slice(1)];
+        } else if (Runtime.isNumberType(item.type) || isPointerType(item.type)) {
           constant = zeros(Runtime.getNativeFieldSize(item.type));
         } else {
           constant = makeEmptyStruct(item.type);
@@ -282,22 +285,23 @@ function JSify(data, functionsOnly) {
       } else {
         constant = parseConst(item.value, item.type, item.ident);
       }
-      assert(typeof constant === 'object');//, [typeof constant, JSON.stringify(constant), item.external]);
 
       // This is a flattened object. We need to find its idents, so they can be assigned to later
-      var structTypes = null;
-      constant.forEach(function(value, i) {
-        if (needsPostSet(value)) { // ident, or expression containing an ident
-          if (!structTypes) structTypes = generateStructTypes(item.type);
-          itemsDict.GlobalVariablePostSet.push({
-            intertype: 'GlobalVariablePostSet',
-            JS: makeSetValue(makeGlobalUse(item.ident), i, value, structTypes[i], false, true) + ';' // ignore=true, since e.g. rtti and statics cause lots of safe_heap errors
-          });
-          constant[i] = '0';
-        } else {
-          if (typeof value === 'string') constant[i] = deParenCarefully(value);
-        }
-      });
+      if (typeof constant === 'object') {
+        var structTypes = null;
+        constant.forEach(function(value, i) {
+          if (needsPostSet(value)) { // ident, or expression containing an ident
+            if (!structTypes) structTypes = generateStructTypes(item.type);
+            itemsDict.GlobalVariablePostSet.push({
+              intertype: 'GlobalVariablePostSet',
+              JS: makeSetValue(makeGlobalUse(item.ident), i, value, structTypes[i], false, true) + ';' // ignore=true, since e.g. rtti and statics cause lots of safe_heap errors
+            });
+            constant[i] = '0';
+          } else {
+            if (typeof value === 'string') constant[i] = deParenCarefully(value);
+          }
+        });
+      }
 
       if (item.external) {
         // External variables in shared libraries should not be declared as
@@ -312,14 +316,18 @@ function JSify(data, functionsOnly) {
       }
 
       // ensure alignment
-      var extra = Runtime.alignMemory(constant.length) - constant.length;
-      if (item.ident.substr(0, 5) == '__ZTV') extra += Runtime.alignMemory(QUANTUM_SIZE);
-      while (extra-- > 0) constant.push(0);
+      if (typeof constant === 'object') {
+        var extra = Runtime.alignMemory(constant.length) - constant.length;
+        if (item.ident.substr(0, 5) == '__ZTV') extra += Runtime.alignMemory(QUANTUM_SIZE);
+        while (extra-- > 0) constant.push(0);
+      }
     }
 
     // NOTE: This is the only place that could potentially create static
     //       allocations in a shared library.
-    constant = makePointer(constant, null, allocator, item.type, index);
+    if (typeof constant !== 'string') {
+      constant = makePointer(constant, null, allocator, item.type, index);
+    }
 
     var js = (index !== null ? '' : item.ident + '=') + constant;
     if (js) js += ';';
@@ -387,6 +395,13 @@ function JSify(data, functionsOnly) {
       // Note: We don't return the dependencies here. Be careful not to end up where this matters
       if (('_' + ident) in Functions.implementedFunctions) return '';
 
+      if (!LibraryManager.library.hasOwnProperty(ident) && !LibraryManager.library.hasOwnProperty(ident + '__inline')) {
+        if (ERROR_ON_UNDEFINED_SYMBOLS) error('unresolved symbol: ' + ident);
+        else if (VERBOSE || (WARN_ON_UNDEFINED_SYMBOLS && !LINKABLE)) warn('unresolved symbol: ' + ident);
+        // emit a stub that will fail at runtime
+        LibraryManager.library[shortident] = new Function("Module['printErr']('missing function: " + shortident + "'); abort(-1);");
+      }
+
       var snippet = LibraryManager.library[ident];
       var redirectedIdent = null;
       var deps = LibraryManager.library[ident + '__deps'] || [];
@@ -448,7 +463,7 @@ function JSify(data, functionsOnly) {
       } else {
         ident = '_' + ident;
       }
-      if (VERBOSE) printErr('adding ' + ident + ' and deps ' + deps);
+      if (VERBOSE) printErr('adding ' + ident + ' and deps ' + deps + ' : ' + (snippet + '').substr(0, 40));
       var depsText = (deps ? '\n' + deps.map(addFromLibrary).filter(function(x) { return x != '' }).join('\n') : '');
       var contentText = isFunction ? snippet : ('var ' + ident + '=' + snippet + ';');
       if (ASM_JS) {
@@ -478,7 +493,6 @@ function JSify(data, functionsOnly) {
       item.JS = '';
     } else {
       // If this is not linkable, anything not in the library is definitely missing
-      var cancel = false;
       if (item.ident in DEAD_FUNCTIONS) {
         if (LibraryManager.library[shortident + '__asm']) {
           warn('cannot kill asm library function ' + item.ident);
@@ -488,17 +502,7 @@ function JSify(data, functionsOnly) {
           delete LibraryManager.library[shortident + '__deps'];
         }
       }
-      if (!LINKABLE && !LibraryManager.library.hasOwnProperty(shortident) && !LibraryManager.library.hasOwnProperty(shortident + '__inline')) {
-        if (ERROR_ON_UNDEFINED_SYMBOLS) error('unresolved symbol: ' + shortident);
-        else if (VERBOSE || WARN_ON_UNDEFINED_SYMBOLS) warn('unresolved symbol: ' + shortident);
-        if (ASM_JS) {
-          // emit a stub that will fail during runtime. this allows asm validation to succeed.
-          LibraryManager.library[shortident] = new Function("Module['printErr']('missing function: " + shortident + "'); abort(-1);");
-        } else {
-          cancel = true; // emit nothing, not even  var X = undefined;
-        }
-      }
-      item.JS = cancel ? ';' : addFromLibrary(shortident);
+      item.JS = addFromLibrary(shortident);
     }
   }
 
@@ -1415,7 +1419,7 @@ function JSify(data, functionsOnly) {
     
     // store current list offset in tempInt, advance list offset by STACK_ALIGN, return list entry stored at tempInt
     return '(tempInt=' + makeGetValue(ident, Runtime.QUANTUM_SIZE, '*') + ',' +
-                         makeSetValue(ident, Runtime.QUANTUM_SIZE, 'tempInt + ' + move, '*', null, null, null, null, ',') + ',' +
+                         makeSetValue(ident, Runtime.QUANTUM_SIZE, asmCoercion('tempInt + ' + move, 'i32'), '*', null, null, null, null, ',') + ',' +
                          makeGetValue(makeGetValue(ident, 0, '*'), 'tempInt', item.type) + ')';
   }
 
@@ -1844,7 +1848,7 @@ function JSify(data, functionsOnly) {
     // rest of the output that we started to print out earlier (see comment on the
     // "Final shape that will be created").
     if (PRECISE_I64_MATH && Types.preciseI64MathUsed) {
-      if (!INCLUDE_FULL_LIBRARY && !SIDE_MODULE) {
+      if (!INCLUDE_FULL_LIBRARY && !SIDE_MODULE && !BUILD_AS_SHARED_LIB) {
         // first row are utilities called from generated code, second are needed from fastLong
         ['i64Add', 'i64Subtract', 'bitshift64Shl', 'bitshift64Lshr', 'bitshift64Ashr',
          'llvm_ctlz_i32', 'llvm_cttz_i32'].forEach(function(func) {

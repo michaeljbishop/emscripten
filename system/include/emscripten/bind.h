@@ -17,6 +17,8 @@ namespace emscripten {
         BY_EMVAL = 2,
     };
 
+#define EMSCRIPTEN_ALWAYS_INLINE __attribute__((always_inline))
+
     namespace internal {
         typedef long GenericEnumValue;
 
@@ -533,6 +535,8 @@ namespace emscripten {
     template<typename ClassType>
     class value_array : public internal::noncopyable {
     public:
+        typedef ClassType class_type;
+
         value_array(const char* name) {
             using namespace internal;
             _embind_register_value_array(
@@ -605,6 +609,8 @@ namespace emscripten {
     template<typename ClassType>
     class value_object : public internal::noncopyable {
     public:
+        typedef ClassType class_type;
+
         value_object(const char* name) {
             using namespace internal;
             _embind_register_value_object(
@@ -689,6 +695,10 @@ namespace emscripten {
         static void* share(void* v) {
             return 0; // no sharing
         }
+
+        static PointerType* construct_null() {
+            return new PointerType;
+        }
     };
 
     // specialize if you have a different pointer type
@@ -720,6 +730,10 @@ namespace emscripten {
                 val_deleter(val::take_ownership(v)));
         }
 
+        static PointerType* construct_null() {
+            return new PointerType;
+        }
+
     private:
         class val_deleter {
         public:
@@ -745,6 +759,8 @@ namespace emscripten {
     template<typename T>
     class wrapper : public T {
     public:
+        typedef T class_type;
+
         explicit wrapper(val&& wrapped)
             : wrapped(std::forward<val>(wrapped))
         {}
@@ -794,13 +810,14 @@ namespace emscripten {
         // NOTE: this returns the class type, not the pointer type
         template<typename T>
         inline TYPEID getActualType(T* ptr) {
-            assert(ptr);
             return reinterpret_cast<TYPEID>(&typeid(*ptr));
         };
     }
 
     template<typename BaseClass>
     struct base {
+        typedef BaseClass class_type;
+
         template<typename ClassType>
         static void verify() {
             static_assert(!std::is_same<ClassType, BaseClass>::value, "Base must not have same type as class");
@@ -847,6 +864,9 @@ namespace emscripten {
     template<typename ClassType, typename BaseSpecifier = internal::NoBaseClass>
     class class_ {
     public:
+        typedef ClassType class_type;
+        typedef BaseSpecifier base_specifier;
+
         class_() = delete;
 
         explicit class_(const char* name) {
@@ -867,7 +887,7 @@ namespace emscripten {
         }
 
         template<typename PointerType>
-        class_& smart_ptr() {
+        const class_& smart_ptr() const {
             using namespace internal;
 
             typedef smart_ptr_trait<PointerType> PointerTrait;
@@ -881,21 +901,21 @@ namespace emscripten {
                 typeid(PointerType).name(),
                 PointerTrait::get_sharing_policy(),
                 reinterpret_cast<GenericFunction>(&PointerTrait::get),
-                reinterpret_cast<GenericFunction>(&operator_new<PointerType>),
+                reinterpret_cast<GenericFunction>(&PointerTrait::construct_null),
                 reinterpret_cast<GenericFunction>(&PointerTrait::share),
                 reinterpret_cast<GenericFunction>(&raw_destructor<PointerType>));
             return *this;
         };
 
         template<typename... ConstructorArgs, typename... Policies>
-        class_& constructor(Policies... policies) {
+        const class_& constructor(Policies... policies) const {
             return constructor(
                 &internal::operator_new<ClassType, ConstructorArgs...>,
                 policies...);
         }
 
         template<typename... Args, typename ReturnType, typename... Policies>
-        class_& constructor(ReturnType (*factory)(Args...), Policies...) {
+        const class_& constructor(ReturnType (*factory)(Args...), Policies...) const {
             using namespace internal;
 
             // TODO: allows all raw pointers... policies need a rethink
@@ -910,7 +930,7 @@ namespace emscripten {
         }
 
         template<typename SmartPtr, typename... Args, typename... Policies>
-        class_& smart_ptr_constructor(SmartPtr (*factory)(Args...), Policies...) {
+        const class_& smart_ptr_constructor(SmartPtr (*factory)(Args...), Policies...) const {
             using namespace internal;
 
             smart_ptr<SmartPtr>();
@@ -926,7 +946,7 @@ namespace emscripten {
         }
 
         template<typename WrapperType, typename PointerType = WrapperType*>
-        class_& allow_subclass() {
+        const class_& allow_subclass() const {
             using namespace internal;
 
             auto cls = class_<WrapperType, base<ClassType>>(typeid(WrapperType).name())
@@ -940,7 +960,7 @@ namespace emscripten {
         }
 
         template<typename ReturnType, typename... Args, typename... Policies>
-        class_& function(const char* methodName, ReturnType (ClassType::*memberFunction)(Args...), Policies...) {
+        EMSCRIPTEN_ALWAYS_INLINE const class_& function(const char* methodName, ReturnType (ClassType::*memberFunction)(Args...), Policies...) const {
             using namespace internal;
 
             typename WithPolicies<Policies...>::template ArgTypeList<ReturnType, AllowedRawPointer<ClassType>, Args...> args;
@@ -955,7 +975,7 @@ namespace emscripten {
         }
 
         template<typename ReturnType, typename... Args, typename... Policies>
-        class_& function(const char* methodName, ReturnType (ClassType::*memberFunction)(Args...) const, Policies...) {
+        EMSCRIPTEN_ALWAYS_INLINE const class_& function(const char* methodName, ReturnType (ClassType::*memberFunction)(Args...) const, Policies...) const {
             using namespace internal;
 
             typename WithPolicies<Policies...>::template ArgTypeList<ReturnType, AllowedRawPointer<const ClassType>, Args...> args;
@@ -970,7 +990,7 @@ namespace emscripten {
         }
 
         template<typename ReturnType, typename ThisType, typename... Args, typename... Policies>
-        class_& function(const char* methodName, ReturnType (*function)(ThisType, Args...), Policies...) {
+        EMSCRIPTEN_ALWAYS_INLINE const class_& function(const char* methodName, ReturnType (*function)(ThisType, Args...), Policies...) const {
             using namespace internal;
 
             typename WithPolicies<Policies...>::template ArgTypeList<ReturnType, ThisType, Args...> args;
@@ -985,7 +1005,7 @@ namespace emscripten {
         }
 
         template<typename FieldType, typename = typename std::enable_if<!std::is_function<FieldType>::value>::type>
-        class_& property(const char* fieldName, const FieldType ClassType::*field) {
+        EMSCRIPTEN_ALWAYS_INLINE const class_& property(const char* fieldName, const FieldType ClassType::*field) const {
             using namespace internal;
 
             _embind_register_class_property(
@@ -1001,7 +1021,7 @@ namespace emscripten {
         }
 
         template<typename FieldType, typename = typename std::enable_if<!std::is_function<FieldType>::value>::type>
-        class_& property(const char* fieldName, FieldType ClassType::*field) {
+        EMSCRIPTEN_ALWAYS_INLINE const class_& property(const char* fieldName, FieldType ClassType::*field) const {
             using namespace internal;
 
             _embind_register_class_property(
@@ -1017,7 +1037,7 @@ namespace emscripten {
         }
 
         template<typename Getter>
-        class_& property(const char* fieldName, Getter getter) {
+        EMSCRIPTEN_ALWAYS_INLINE const class_& property(const char* fieldName, Getter getter) const {
             using namespace internal;
             typedef GetterPolicy<Getter> GP;
             _embind_register_class_property(
@@ -1033,7 +1053,7 @@ namespace emscripten {
         }
 
         template<typename Getter, typename Setter>
-        class_& property(const char* fieldName, Getter getter, Setter setter) {
+        EMSCRIPTEN_ALWAYS_INLINE const class_& property(const char* fieldName, Getter getter, Setter setter) const {
             using namespace internal;
             typedef GetterPolicy<Getter> GP;
             typedef SetterPolicy<Setter> SP;
@@ -1050,7 +1070,7 @@ namespace emscripten {
         }
 
         template<typename ReturnType, typename... Args, typename... Policies>
-        class_& class_function(const char* methodName, ReturnType (*classMethod)(Args...), Policies...) {
+        EMSCRIPTEN_ALWAYS_INLINE const class_& class_function(const char* methodName, ReturnType (*classMethod)(Args...), Policies...) const {
             using namespace internal;
 
             typename WithPolicies<Policies...>::template ArgTypeList<ReturnType, Args...> args;
@@ -1157,6 +1177,8 @@ namespace emscripten {
     template<typename EnumType>
     class enum_ {
     public:
+        typedef EnumType enum_type;
+
         enum_(const char* name) {
             _embind_register_enum(
                 internal::TypeID<EnumType>::get(),
@@ -1199,7 +1221,7 @@ namespace emscripten {
         _embind_register_constant(
             name,
             TypeID<const ConstantType&>::get(),
-            asGenericValue(BindingType<const ConstantType&>::toWireType(v)));
+            asGenericValue(BT::toWireType(v)));
     }
 }
 

@@ -52,32 +52,33 @@ LibraryManager.library = {
       ___setErrNo(ERRNO_CODES.ENOTDIR);
       return 0;
     }
-    var err = _open(dirname, {{{ cDefine('O_RDONLY') }}}, allocate([0, 0, 0, 0], 'i32', ALLOC_STACK));
-    // open returns 0 on failure, not -1
-    return err === -1 ? 0 : err;
+    var fd = _open(dirname, {{{ cDefine('O_RDONLY') }}}, allocate([0, 0, 0, 0], 'i32', ALLOC_STACK));
+    return fd === -1 ? 0 : FS.getPtrForStream(FS.getStream(fd));
   },
-  closedir__deps: ['$FS', '__setErrNo', '$ERRNO_CODES', 'close'],
+  closedir__deps: ['$FS', '__setErrNo', '$ERRNO_CODES', 'close', 'fileno'],
   closedir: function(dirp) {
     // int closedir(DIR *dirp);
     // http://pubs.opengroup.org/onlinepubs/007908799/xsh/closedir.html
-    return _close(dirp);
+    var fd = _fileno(dirp);
+    return _close(fd);
   },
   telldir__deps: ['$FS', '__setErrNo', '$ERRNO_CODES'],
   telldir: function(dirp) {
     // long int telldir(DIR *dirp);
     // http://pubs.opengroup.org/onlinepubs/007908799/xsh/telldir.html
-    var stream = FS.getStream(dirp);
+    var stream = FS.getStreamFromPtr(dirp);
     if (!stream || !FS.isDir(stream.node.mode)) {
       ___setErrNo(ERRNO_CODES.EBADF);
       return -1;
     }
     return stream.position;
   },
-  seekdir__deps: ['$FS', '__setErrNo', '$ERRNO_CODES', 'lseek'],
+  seekdir__deps: ['$FS', '__setErrNo', '$ERRNO_CODES', 'lseek', 'fileno'],
   seekdir: function(dirp, loc) {
     // void seekdir(DIR *dirp, long int loc);
     // http://pubs.opengroup.org/onlinepubs/007908799/xsh/seekdir.html
-    _lseek(dirp, loc, {{{ cDefine('SEEK_SET') }}});
+    var fd = _fileno(dirp);
+    _lseek(fd, loc, {{{ cDefine('SEEK_SET') }}});
   },
   rewinddir__deps: ['seekdir'],
   rewinddir: function(dirp) {
@@ -89,7 +90,7 @@ LibraryManager.library = {
   readdir_r: function(dirp, entry, result) {
     // int readdir_r(DIR *dirp, struct dirent *entry, struct dirent **result);
     // http://pubs.opengroup.org/onlinepubs/007908799/xsh/readdir_r.html
-    var stream = FS.getStream(dirp);
+    var stream = FS.getStreamFromPtr(dirp);
     if (!stream) {
       return ___setErrNo(ERRNO_CODES.EBADF);
     }
@@ -134,7 +135,7 @@ LibraryManager.library = {
   readdir: function(dirp) {
     // struct dirent *readdir(DIR *dirp);
     // http://pubs.opengroup.org/onlinepubs/007908799/xsh/readdir_r.html
-    var stream = FS.getStream(dirp);
+    var stream = FS.getStreamFromPtr(dirp);
     if (!stream) {
       ___setErrNo(ERRNO_CODES.EBADF);
       return 0;
@@ -2300,19 +2301,20 @@ LibraryManager.library = {
   clearerr: function(stream) {
     // void clearerr(FILE *stream);
     // http://pubs.opengroup.org/onlinepubs/000095399/functions/clearerr.html
-    stream = FS.getStream(stream);
+    stream = FS.getStreamFromPtr(stream);
     if (!stream) {
       return;
     }
     stream.eof = false;
     stream.error = false;
   },
-  fclose__deps: ['close', 'fsync'],
+  fclose__deps: ['close', 'fsync', 'fileno'],
   fclose: function(stream) {
     // int fclose(FILE *stream);
     // http://pubs.opengroup.org/onlinepubs/000095399/functions/fclose.html
-    _fsync(stream);
-    return _close(stream);
+    var fd = _fileno(stream);
+    _fsync(fd);
+    return _close(fd);
   },
   fdopen__deps: ['$FS', '__setErrNo', '$ERRNO_CODES'],
   fdopen: function(fildes, mode) {
@@ -2333,21 +2335,21 @@ LibraryManager.library = {
     } else {
       stream.error = false;
       stream.eof = false;
-      return fildes;
+      return FS.getPtrForStream(stream);
     }
   },
   feof__deps: ['$FS'],
   feof: function(stream) {
     // int feof(FILE *stream);
     // http://pubs.opengroup.org/onlinepubs/000095399/functions/feof.html
-    stream = FS.getStream(stream);
+    stream = FS.getStreamFromPtr(stream);
     return Number(stream && stream.eof);
   },
   ferror__deps: ['$FS'],
   ferror: function(stream) {
     // int ferror(FILE *stream);
     // http://pubs.opengroup.org/onlinepubs/000095399/functions/ferror.html
-    stream = FS.getStream(stream);
+    stream = FS.getStreamFromPtr(stream);
     return Number(stream && stream.error);
   },
   fflush__deps: ['$FS', '__setErrNo', '$ERRNO_CODES'],
@@ -2361,7 +2363,7 @@ LibraryManager.library = {
   fgetc: function(stream) {
     // int fgetc(FILE *stream);
     // http://pubs.opengroup.org/onlinepubs/000095399/functions/fgetc.html
-    var streamObj = FS.getStream(stream);
+    var streamObj = FS.getStreamFromPtr(stream);
     if (!streamObj) return -1;
     if (streamObj.eof || streamObj.error) return -1;
     var ret = _fread(_fgetc.ret, 1, 1, stream);
@@ -2386,7 +2388,7 @@ LibraryManager.library = {
   fgetpos: function(stream, pos) {
     // int fgetpos(FILE *restrict stream, fpos_t *restrict pos);
     // http://pubs.opengroup.org/onlinepubs/000095399/functions/fgetpos.html
-    stream = FS.getStream(stream);
+    stream = FS.getStreamFromPtr(stream);
     if (!stream) {
       ___setErrNo(ERRNO_CODES.EBADF);
       return -1;
@@ -2404,7 +2406,7 @@ LibraryManager.library = {
   fgets: function(s, n, stream) {
     // char *fgets(char *restrict s, int n, FILE *restrict stream);
     // http://pubs.opengroup.org/onlinepubs/000095399/functions/fgets.html
-    var streamObj = FS.getStream(stream);
+    var streamObj = FS.getStreamFromPtr(stream);
     if (!streamObj) return 0;
     if (streamObj.error || streamObj.eof) return 0;
     var byte_;
@@ -2428,8 +2430,7 @@ LibraryManager.library = {
   fileno: function(stream) {
     // int fileno(FILE *stream);
     // http://pubs.opengroup.org/onlinepubs/000095399/functions/fileno.html
-    // We use file descriptor numbers and FILE* streams interchangeably.
-    return stream;
+    return FS.getStreamFromPtr(stream).fd;
   },
   ftrylockfile: function() {
     // int ftrylockfile(FILE *file);
@@ -2471,19 +2472,20 @@ LibraryManager.library = {
       ___setErrNo(ERRNO_CODES.EINVAL);
       return 0;
     }
-    var ret = _open(filename, flags, allocate([0x1FF, 0, 0, 0], 'i32', ALLOC_STACK));  // All creation permissions.
-    return (ret == -1) ? 0 : ret;
+    var fd = _open(filename, flags, allocate([0x1FF, 0, 0, 0], 'i32', ALLOC_STACK));  // All creation permissions.
+    return fd === -1 ? 0 : FS.getPtrForStream(FS.getStream(fd));
   },
-  fputc__deps: ['$FS', 'write'],
+  fputc__deps: ['$FS', 'write', 'fileno'],
   fputc__postset: '_fputc.ret = allocate([0], "i8", ALLOC_STATIC);',
   fputc: function(c, stream) {
     // int fputc(int c, FILE *stream);
     // http://pubs.opengroup.org/onlinepubs/000095399/functions/fputc.html
     var chr = unSign(c & 0xFF);
     {{{ makeSetValue('_fputc.ret', '0', 'chr', 'i8') }}};
-    var ret = _write(stream, _fputc.ret, 1);
+    var fd = _fileno(stream);
+    var ret = _write(fd, _fputc.ret, 1);
     if (ret == -1) {
-      var streamObj = FS.getStream(stream);
+      var streamObj = FS.getStreamFromPtr(stream);
       if (streamObj) streamObj.error = true;
       return -1;
     } else {
@@ -2499,11 +2501,12 @@ LibraryManager.library = {
     return _fputc(c, {{{ makeGetValue(makeGlobalUse('_stdout'), '0', 'void*') }}});
   },
   putchar_unlocked: 'putchar',
-  fputs__deps: ['write', 'strlen'],
+  fputs__deps: ['write', 'strlen', 'fileno'],
   fputs: function(s, stream) {
     // int fputs(const char *restrict s, FILE *restrict stream);
     // http://pubs.opengroup.org/onlinepubs/000095399/functions/fputs.html
-    return _write(stream, s, _strlen(s));
+    var fd = _fileno(stream);
+    return _write(fd, s, _strlen(s));
   },
   puts__deps: ['fputs', 'fputc', 'stdout'],
   puts: function(s) {
@@ -2528,7 +2531,7 @@ LibraryManager.library = {
       return 0;
     }
     var bytesRead = 0;
-    var streamObj = FS.getStream(stream);
+    var streamObj = FS.getStreamFromPtr(stream);
     if (!streamObj) {
       ___setErrNo(ERRNO_CODES.EBADF);
       return 0;
@@ -2538,7 +2541,7 @@ LibraryManager.library = {
       bytesToRead--;
       bytesRead++;
     }
-    var err = _read(stream, ptr, bytesToRead);
+    var err = _read(streamObj.fd, ptr, bytesToRead);
     if (err == -1) {
       if (streamObj) streamObj.error = true;
       return 0;
@@ -2552,7 +2555,7 @@ LibraryManager.library = {
     // FILE *freopen(const char *restrict filename, const char *restrict mode, FILE *restrict stream);
     // http://pubs.opengroup.org/onlinepubs/000095399/functions/freopen.html
     if (!filename) {
-      var streamObj = FS.getStream(stream);
+      var streamObj = FS.getStreamFromPtr(stream);
       if (!streamObj) {
         ___setErrNo(ERRNO_CODES.EBADF);
         return 0;
@@ -2564,15 +2567,16 @@ LibraryManager.library = {
     _fclose(stream);
     return _fopen(filename, mode);
   },
-  fseek__deps: ['$FS', 'lseek'],
+  fseek__deps: ['$FS', 'lseek', 'fileno'],
   fseek: function(stream, offset, whence) {
     // int fseek(FILE *stream, long offset, int whence);
     // http://pubs.opengroup.org/onlinepubs/000095399/functions/fseek.html
-    var ret = _lseek(stream, offset, whence);
+    var fd = _fileno(stream);
+    var ret = _lseek(fd, offset, whence);
     if (ret == -1) {
       return -1;
     }
-    stream = FS.getStream(stream);
+    stream = FS.getStreamFromPtr(stream);
     stream.eof = false;
     return 0;
   },
@@ -2581,7 +2585,7 @@ LibraryManager.library = {
   fsetpos: function(stream, pos) {
     // int fsetpos(FILE *stream, const fpos_t *pos);
     // http://pubs.opengroup.org/onlinepubs/000095399/functions/fsetpos.html
-    stream = FS.getStream(stream);
+    stream = FS.getStreamFromPtr(stream);
     if (!stream) {
       ___setErrNo(ERRNO_CODES.EBADF);
       return -1;
@@ -2600,7 +2604,7 @@ LibraryManager.library = {
   ftell: function(stream) {
     // long ftell(FILE *stream);
     // http://pubs.opengroup.org/onlinepubs/000095399/functions/ftell.html
-    stream = FS.getStream(stream);
+    stream = FS.getStreamFromPtr(stream);
     if (!stream) {
       ___setErrNo(ERRNO_CODES.EBADF);
       return -1;
@@ -2613,15 +2617,16 @@ LibraryManager.library = {
     }
   },
   ftello: 'ftell',
-  fwrite__deps: ['$FS', 'write'],
+  fwrite__deps: ['$FS', 'write', 'fileno'],
   fwrite: function(ptr, size, nitems, stream) {
     // size_t fwrite(const void *restrict ptr, size_t size, size_t nitems, FILE *restrict stream);
     // http://pubs.opengroup.org/onlinepubs/000095399/functions/fwrite.html
     var bytesToWrite = nitems * size;
     if (bytesToWrite == 0) return 0;
-    var bytesWritten = _write(stream, ptr, bytesToWrite);
+    var fd = _fileno(stream);
+    var bytesWritten = _write(fd, ptr, bytesToWrite);
     if (bytesWritten == -1) {
-      var streamObj = FS.getStream(stream);
+      var streamObj = FS.getStreamFromPtr(stream);
       if (streamObj) streamObj.error = true;
       return 0;
     } else {
@@ -2684,7 +2689,7 @@ LibraryManager.library = {
     // void rewind(FILE *stream);
     // http://pubs.opengroup.org/onlinepubs/000095399/functions/rewind.html
     _fseek(stream, 0, 0);  // SEEK_SET.
-    var streamObj = FS.getStream(stream);
+    var streamObj = FS.getStreamFromPtr(stream);
     if (streamObj) streamObj.error = false;
   },
   setvbuf: function(stream, buf, type, size) {
@@ -2741,7 +2746,7 @@ LibraryManager.library = {
   ungetc: function(c, stream) {
     // int ungetc(int c, FILE *stream);
     // http://pubs.opengroup.org/onlinepubs/000095399/functions/ungetc.html
-    stream = FS.getStream(stream);
+    stream = FS.getStreamFromPtr(stream);
     if (!stream) {
       return -1;
     }
@@ -2766,7 +2771,7 @@ LibraryManager.library = {
   fscanf: function(stream, format, varargs) {
     // int fscanf(FILE *restrict stream, const char *restrict format, ... );
     // http://pubs.opengroup.org/onlinepubs/000095399/functions/scanf.html
-    var streamObj = FS.getStream(stream);
+    var streamObj = FS.getStreamFromPtr(stream);
     if (!streamObj) {
       return -1;
     }
@@ -2909,7 +2914,7 @@ LibraryManager.library = {
   // ==========================================================================
 
   mmap__deps: ['$FS'],
-  mmap: function(start, num, prot, flags, stream, offset) {
+  mmap: function(start, num, prot, flags, fd, offset) {
     /* FIXME: Since mmap is normally implemented at the kernel level,
      * this implementation simply uses malloc underneath the call to
      * mmap.
@@ -2920,13 +2925,13 @@ LibraryManager.library = {
 
     if (!_mmap.mappings) _mmap.mappings = {};
 
-    if (stream == -1) {
+    if (fd == -1) {
       ptr = _malloc(num);
       if (!ptr) return -1;
       _memset(ptr, 0, num);
       allocated = true;
     } else {
-      var info = FS.getStream(stream);
+      var info = FS.getStream(fd);
       if (!info) return -1;
       try {
         var res = FS.mmap(info, HEAPU8, start, num, offset, prot, flags);
@@ -3520,11 +3525,18 @@ LibraryManager.library = {
     return ret;
   },
 
+  emscripten_memcpy_big: function(dest, src, num) {
+    HEAPU8.set(HEAPU8.subarray(src, src+num), dest);
+    return dest;
+  },
+
   memcpy__asm: true,
   memcpy__sig: 'iiii',
+  memcpy__deps: ['emscripten_memcpy_big'],
   memcpy: function(dest, src, num) {
     dest = dest|0; src = src|0; num = num|0;
     var ret = 0;
+    if ((num|0) >= 4096) return _emscripten_memcpy_big(dest|0, src|0, num|0)|0;
     ret = dest|0;
     if ((dest&3) == (src&3)) {
       while (dest & 3) {
@@ -3762,79 +3774,6 @@ LibraryManager.library = {
       }
     }
     return pdest;
-  },
-
-  strcmp__deps: ['strncmp'],
-  strcmp: function(px, py) {
-    return _strncmp(px, py, TOTAL_MEMORY);
-  },
-  // We always assume ASCII locale.
-  strcoll: 'strcmp',
-  strcoll_l__deps: ['strcoll'],
-  strcoll_l: function(px, py) {
-    return _strcoll(px, py); // no locale support yet
-  },
-
-  strcasecmp__asm: true,
-  strcasecmp__sig: 'iii',
-  strcasecmp__deps: ['strncasecmp'],
-  strcasecmp: function(px, py) {
-    px = px|0; py = py|0;
-    return _strncasecmp(px, py, -1)|0;
-  },
-
-  strncmp: function(px, py, n) {
-    var i = 0;
-    while (i < n) {
-      var x = {{{ makeGetValue('px', 'i', 'i8', 0, 1) }}};
-      var y = {{{ makeGetValue('py', 'i', 'i8', 0, 1) }}};
-      if (x == y && x == 0) return 0;
-      if (x == 0) return -1;
-      if (y == 0) return 1;
-      if (x == y) {
-        i ++;
-        continue;
-      } else {
-        return x > y ? 1 : -1;
-      }
-    }
-    return 0;
-  },
-
-  strncasecmp__asm: true,
-  strncasecmp__sig: 'iiii',
-  strncasecmp__deps: ['tolower'],
-  strncasecmp: function(px, py, n) {
-    px = px|0; py = py|0; n = n|0;
-    var i = 0, x = 0, y = 0;
-    while ((i>>>0) < (n>>>0)) {
-      x = _tolower({{{ makeGetValueAsm('px', 'i', 'i8', 0, 1) }}})|0;
-      y = _tolower({{{ makeGetValueAsm('py', 'i', 'i8', 0, 1) }}})|0;
-      if (((x|0) == (y|0)) & ((x|0) == 0)) return 0;
-      if ((x|0) == 0) return -1;
-      if ((y|0) == 0) return 1;
-      if ((x|0) == (y|0)) {
-        i = (i + 1)|0;
-        continue;
-      } else {
-        return ((x>>>0) > (y>>>0) ? 1 : -1)|0;
-      }
-    }
-    return 0;
-  },
-
-  memcmp__asm: true,
-  memcmp__sig: 'iiii',
-  memcmp: function(p1, p2, num) {
-    p1 = p1|0; p2 = p2|0; num = num|0;
-    var i = 0, v1 = 0, v2 = 0;
-    while ((i|0) < (num|0)) {
-      v1 = {{{ makeGetValueAsm('p1', 'i', 'i8', true) }}};
-      v2 = {{{ makeGetValueAsm('p2', 'i', 'i8', true) }}};
-      if ((v1|0) != (v2|0)) return ((v1|0) > (v2|0) ? 1 : -1)|0;
-      i = (i+1)|0;
-    }
-    return 0;
   },
 
   memchr: function(ptr, chr, num) {
@@ -4495,7 +4434,7 @@ LibraryManager.library = {
   // and free the exception. Note that if the dynCall on the destructor fails
   // due to calling apply on undefined, that means that the destructor is
   // an invalid index into the FUNCTION_TABLE, so something has gone wrong.
-  __cxa_end_catch__deps: ['__cxa_free_exception', '__cxa_last_thrown_exception', '___cxa_exception_header_size', '__cxa_caught_exceptions'],
+  __cxa_end_catch__deps: ['__cxa_free_exception', '__cxa_last_thrown_exception', '__cxa_exception_header_size', '__cxa_caught_exceptions'],
   __cxa_end_catch: function() {
     if (___cxa_end_catch.rethrown) {
       ___cxa_end_catch.rethrown = false;
@@ -4688,6 +4627,8 @@ LibraryManager.library = {
   _ZTIt: [0], // unsigned short
   _ZTIv: [0], // void
   _ZTIPv: [0], // void*
+
+  _ZTISt9exception: 'allocate([allocate([1,0,0,0,0,0,0], "i8", ALLOC_STATIC)+8, 0], "i32", ALLOC_STATIC)', // typeinfo for std::exception
 
   llvm_uadd_with_overflow_i8: function(x, y) {
     x = x & 0xff;
@@ -7428,20 +7369,10 @@ LibraryManager.library = {
   // netinet/in.h
   // ==========================================================================
 
-  _in6addr_any:
+  in6addr_any:
     'allocate([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0], "i8", ALLOC_STATIC)',
-  _in6addr_loopback:
+  in6addr_loopback:
     'allocate([0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1], "i8", ALLOC_STATIC)',
-  _in6addr_linklocal_allnodes:
-    'allocate([255,2,0,0,0,0,0,0,0,0,0,0,0,0,0,1], "i8", ALLOC_STATIC)',
-  _in6addr_linklocal_allrouters:
-    'allocate([255,2,0,0,0,0,0,0,0,0,0,0,0,0,0,2], "i8", ALLOC_STATIC)',
-  _in6addr_interfacelocal_allnodes:
-    'allocate([255,1,0,0,0,0,0,0,0,0,0,0,0,0,0,1], "i8", ALLOC_STATIC)',
-  _in6addr_interfacelocal_allrouters:
-    'allocate([255,1,0,0,0,0,0,0,0,0,0,0,0,0,0,2], "i8", ALLOC_STATIC)',
-  _in6addr_sitelocal_allrouters:
-    'allocate([255,5,0,0,0,0,0,0,0,0,0,0,0,0,0,2], "i8", ALLOC_STATIC)',
 
   // ==========================================================================
   // netdb.h
@@ -7596,6 +7527,7 @@ LibraryManager.library = {
       } else {
         {{{ makeSetValue('ai', C_STRUCTS.addrinfo.ai_addrlen, C_STRUCTS.sockaddr_in.__size__, 'i32') }}};
       }
+      {{{ makeSetValue('ai', C_STRUCTS.addrinfo.ai_next, '0', 'i32') }}};
 
       return ai;
     }
@@ -8721,6 +8653,8 @@ LibraryManager.library = {
     console.log('ignoring setsockopt command');
     return 0;
   },
+
+  mkport: function() { throw 'TODO' },
 
   // ==========================================================================
   // select.h

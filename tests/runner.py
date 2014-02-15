@@ -36,7 +36,10 @@ except:
 
 # Core test runner class, shared between normal tests and benchmarks
 checked_sanity = False
-test_modes = ['default', 'o1', 'o2', 'asm1', 'asm2', 'asm3', 'asm2f', 'asm2g', 'asm2x86', 's_0_0', 's_0_1']
+if os.environ.get('EMCC_FAST_COMPILER') == '1':
+  test_modes = ['default', 'asm1', 'asm2', 'asm3', 'asm2f', 'asm2g']
+else:
+  test_modes = ['default', 'o1', 'o2', 'asm1', 'asm2', 'asm3', 'asm2f', 'asm2g', 'asm2x86', 's_0_0', 's_0_1']
 test_index = 0
 
 class RunnerCore(unittest.TestCase):
@@ -138,7 +141,11 @@ class RunnerCore(unittest.TestCase):
       post1 = post_build
       post2 = None
 
-    if self.emcc_args is None:
+    emcc_args = self.emcc_args
+    if emcc_args is None:
+      emcc_args = []
+
+    if emcc_args is None: # legacy testing mode, no longer used
       Building.emscripten(filename, append_ext=True, extra_args=extra_emscripten_args)
       if post1:
         exec post1 in locals()
@@ -160,7 +167,7 @@ process(sys.argv[1])
 ''')
         transform.close()
         transform_args = ['--js-transform', "%s %s" % (PYTHON, transform_filename)]
-      Building.emcc(filename + '.o.ll', Settings.serialize() + self.emcc_args + transform_args + Building.COMPILER_TEST_OPTS, filename + '.o.js')
+      Building.emcc(filename + '.o.ll', Settings.serialize() + emcc_args + transform_args + Building.COMPILER_TEST_OPTS, filename + '.o.js')
       if post2: post2(filename + '.o.js')
 
   # Build JavaScript code from source code
@@ -649,7 +656,6 @@ class BrowserCore(RunnerCore):
 
   def btest(self, filename, expected=None, reference=None, force_c=False, reference_slack=0, manual_reference=False, post_build=None,
       args=[], outfile='test.html', message='.'): # TODO: use in all other tests
-    if os.environ.get('EMCC_FAST_COMPILER') == '1' and 'LEGACY_GL_EMULATION=1' in args: return self.skip('no legacy gl emulation in fastcomp')
     # if we are provided the source and not a path, use that
     filename_is_src = '\n' in filename
     src = filename if filename_is_src else ''
@@ -792,6 +798,16 @@ an individual test with
 
   python tests/runner.py ALL.test_hello_world
 
+Debugging: You can run
+
+  EM_SAVE_DIR=1 python tests/runner.py ALL.test_hello_world
+
+in order to save the test runner directory, in /tmp/emscripten_temp. All files
+created by the test will be present there. You can also use EMCC_DEBUG to
+further debug the compiler itself, which works outside of the test suite as
+well: EMCC_DEBUG=1 will emit emcc-* files in that temp dir for each stage
+of the compiler, while EMCC_DEBUG=2 will emit even more files, one for each
+js optimizer phase.
 ==============================================================================
 
 '''

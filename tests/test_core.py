@@ -1158,8 +1158,6 @@ class T(RunnerCore): # Short name, to make it more fun to use manually on the co
     self.do_run_from_file(src, output)
 
   def test_longjmp_throw(self):
-    if self.run_name == 'asm3': return self.skip('issue 2069') # FIXME
-
     for disable_throw in [0, 1]:
       print disable_throw
       Settings.DISABLE_EXCEPTION_CATCHING = disable_throw
@@ -1540,7 +1538,9 @@ class T(RunnerCore): # Short name, to make it more fun to use manually on the co
           return 0;
         }
       '''.replace('COND', '==' if cond else '!=').replace('BODY', r'{ printf("all good\n"); }' if body else '')
-      self.do_run(src, 'dyncall error: vi' if not work else 'all good')
+      # typically we get the dyncall error message from SAFE_DYNCALLS, however llvm opts can devirtualize the
+      # call in -O2, leading to the much nicer error message specifically about the missing function
+      self.do_run(src, ('dyncall error: vi', 'missing function: _ZN2D14doItEv') if not work else 'all good')
 
   def test_dynamic_cast(self):
       if self.emcc_args is None: return self.skip('need libcxxabi')
@@ -2071,7 +2071,6 @@ def process(filename):
 
   def test_bigswitch(self):
     if self.run_name != 'default': return self.skip('TODO: issue #781')
-
     src = open(path_from_root('tests', 'bigswitch.cpp')).read()
     self.do_run(src, '''34962: GL_ARRAY_BUFFER (0x8892)
 26214: what?
@@ -2588,6 +2587,18 @@ The current type of b is: 9
       src, output = (test_path + s for s in ('.in', '.out'))
 
       self.do_run_from_file(src, output)
+
+  def test_memcpy3(self):
+    if Settings.USE_TYPED_ARRAYS != 2: return self.skip('need ta2')
+    test_path = path_from_root('tests', 'core', 'test_memcpy3')
+    src, output = (test_path + s for s in ('.c', '.out'))
+    self.do_run_from_file(src, output)
+
+  def test_memset(self):
+    if Settings.USE_TYPED_ARRAYS != 2: return self.skip('need ta2')
+    test_path = path_from_root('tests', 'core', 'test_memset')
+    src, output = (test_path + s for s in ('.c', '.out'))
+    self.do_run_from_file(src, output)
 
   def test_getopt(self):
       if self.emcc_args is None: return self.skip('needs emcc for libc')
@@ -3253,6 +3264,7 @@ def process(filename):
       #include <assert.h>
       #include <stdio.h>
       #include <dlfcn.h>
+      #include <string.h>
 
       typedef int (*FUNCTYPE)(const char *);
 
@@ -3262,6 +3274,10 @@ def process(filename):
         char str[128];
 
         snprintf(str, sizeof(str), "foobar");
+
+        // HACK: Use strcmp in the main executable so that it doesn't get optimized out and the dynamic library
+        //       is able to use it.
+        assert(!strcmp(str, "foobar"));
 
         lib_handle = dlopen("liblib.so", RTLD_NOW);
         assert(lib_handle != NULL);
@@ -3275,7 +3291,7 @@ def process(filename):
         return 0;
       }
       '''
-    Settings.EXPORTED_FUNCTIONS = ['_main', '_malloc']
+    Settings.EXPORTED_FUNCTIONS = ['_main', '_malloc', '_strcmp']
     self.do_run(src, 'success', force_c=True, post_build=self.dlfcn_post_build)
 
   def test_dlfcn_funcs(self):
@@ -4360,6 +4376,11 @@ PORT: 3979
 
     self.do_run_from_file(src, output)
 
+  def test_netinet_in(self):
+    src = open(path_from_root('tests', 'netinet', 'in.cpp'), 'r').read()
+    expected = open(path_from_root('tests', 'netinet', 'in.out'), 'r').read()
+    self.do_run(src, expected)
+
   # libc++ tests
 
   def test_iostream(self):
@@ -4701,7 +4722,7 @@ return malloc(size);
   def test_gcc_unmangler(self):
     if os.environ.get('EMCC_FAST_COMPILER') != '1': Settings.NAMED_GLOBALS = 1 # test coverage for this; fastcomp never names globals
 
-    Building.COMPILER_TEST_OPTS += ['-I' + path_from_root('third_party')]
+    Building.COMPILER_TEST_OPTS += ['-I' + path_from_root('third_party'), '-Wno-warn-absolute-paths']
 
     self.do_run(open(path_from_root('third_party', 'gcc_demangler.c')).read(), '*d_demangle(char const*, int, unsigned int*)*', args=['_ZL10d_demanglePKciPj'])
 
@@ -4890,6 +4911,7 @@ def process(filename):
     Building.COMPILER_TEST_OPTS += [
       '-I' + path_from_root('tests', 'freetype', 'include'),
       '-I' + path_from_root('tests', 'poppler', 'include'),
+      '-Wno-warn-absolute-paths'
     ]
 
     Settings.INVOKE_RUN = 0 # We append code that does run() ourselves
@@ -5046,7 +5068,7 @@ def process(filename):
           return '\n'.join(sorted(text.split('\n')))
         sizes = len(open('release.js').read()), len(open('debug%d.js' % debug).read())
         print >> sys.stderr, debug, 'sizes', sizes
-        assert abs(sizes[0] - sizes[1]) < 0.0001*sizes[0] # we can't check on identical output, compilation is not 100% deterministic (order of switch elements, etc.), but size should be ~identical
+        assert abs(sizes[0] - sizes[1]) < 0.001*sizes[0], sizes # we can't check on identical output, compilation is not 100% deterministic (order of switch elements, etc.), but size should be ~identical
         print >> sys.stderr, 'debug check %d passed too' % debug
 
       try:
@@ -5073,9 +5095,12 @@ def process(filename):
     else:
       bitcode = path_from_root('tests', 'python', 'python.small.bc')
 
-    self.do_ll_run(bitcode,
-                    'hello python world!\n[0, 2, 4, 6]\n5\n22\n5.470000',
-                    args=['-S', '-c' '''print "hello python world!"; print [x*2 for x in range(4)]; t=2; print 10-3-t; print (lambda x: x*2)(11); print '%f' % 5.47'''])
+    for lto in [0, 1]:
+      if lto == 1: self.emcc_args += ['--llvm-lto', '1']
+      print self.emcc_args
+      self.do_ll_run(bitcode,
+                      'hello python world!\n[0, 2, 4, 6]\n5\n22\n5.470000',
+                      args=['-S', '-c' '''print "hello python world!"; print [x*2 for x in range(4)]; t=2; print 10-3-t; print (lambda x: x*2)(11); print '%f' % 5.47'''])
 
   def test_lifetime(self):
     if self.emcc_args is None: return self.skip('test relies on emcc opts')
@@ -5103,7 +5128,6 @@ def process(filename):
           'structparam', 'extendedprecision', 'issue_39', 'emptystruct', 'phinonexist', 'quotedlabel', 'oob_ta2', 'phientryimplicit', 'phiself', 'invokebitcast', 'funcptr', # invalid ir
           'structphiparam', 'callwithstructural_ta2', 'callwithstructural64_ta2', 'structinparam', # pnacl limitations in ExpandStructRegs
           '2xi40', # pnacl limitations in ExpandGetElementPtr
-          'legalizer_ta2', # pnacl limitation in not legalizing i104, i96, etc.
           'indirectbrphi', 'ptrtoint_blockaddr', 'quoted', # current fastcomp limitations FIXME
           'sillyfuncast2', 'sillybitcast', 'atomicrmw_unaligned' # TODO XXX
         ]: continue
@@ -5115,6 +5139,9 @@ def process(filename):
           continue
         if '_le32' in shortname and not self.is_le32():
           print self.skip('case "%s" not relevant for non-le32 target' % shortname)
+          continue
+        if '_fastcomp' in shortname and not os.environ.get('EMCC_FAST_COMPILER') == '1':
+          print self.skip('case "%s" not relevant for non-fastcomp' % shortname)
           continue
         self.emcc_args = emcc_args
         if os.path.exists(shortname + '.emcc'):
@@ -5145,7 +5172,7 @@ def process(filename):
   def test_fuzz(self):
     if Settings.USE_TYPED_ARRAYS != 2: return self.skip('needs ta2')
 
-    Building.COMPILER_TEST_OPTS += ['-I' + path_from_root('tests', 'fuzz')]
+    Building.COMPILER_TEST_OPTS += ['-I' + path_from_root('tests', 'fuzz'), '-Wno-warn-absolute-paths']
 
     def run_all(x):
       print x

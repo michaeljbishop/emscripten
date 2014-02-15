@@ -143,6 +143,8 @@ If manually bisecting:
       os.chdir(cwd)
 
   def test_split(self):
+    if os.environ.get('EMCC_FAST_COMPILER') == '1': return self.skip('no --split in fastcomp, deprecated')
+
     # test HTML generation.
     self.reftest(path_from_root('tests', 'htmltest.png'))
     output = Popen([PYTHON, EMCC, path_from_root('tests', 'hello_world_sdl.cpp'), '-o', 'something.js', '--split', '100', '--pre-js', 'reftest.js']).communicate()
@@ -235,6 +237,8 @@ If manually bisecting:
     self.run_browser('something.html', 'You should see "hello, world!" and a colored cube.', '/report_result?0')
 
   def test_split_in_source_filenames(self):
+    if os.environ.get('EMCC_FAST_COMPILER') == '1': return self.skip('no --split in fastcomp, deprecated')
+
     self.reftest(path_from_root('tests', 'htmltest.png'))
     output = Popen([PYTHON, EMCC, path_from_root('tests', 'hello_world_sdl.cpp'), '-o', 'something.js', '-g', '--split', '100', '--pre-js', 'reftest.js']).communicate()
     assert os.path.exists(os.path.join(self.get_dir(), 'something.js')), 'must be main js file'
@@ -656,6 +660,9 @@ If manually bisecting:
     shutil.move(os.path.join(self.get_dir(), 'datafile.txt'), 'datafile.txt.renamedsoitcannotbefound');
     self.run_browser('page.html', '', '/report_result?1')
 
+  def test_sdl_swsurface(self):
+    self.btest('sdl_swsurface.c', expected='1')
+
   def test_sdl_image(self):
     # load an image file, get pixel data. Also O2 coverage for --preload-file, and memory-init
     shutil.copyfile(path_from_root('tests', 'screenshot.jpg'), os.path.join(self.get_dir(), 'screenshot.jpg'))
@@ -721,10 +728,13 @@ If manually bisecting:
     self.btest('sdl_stb_image_data.c', reference='screenshot.jpg', args=['-s', 'STB_IMAGE=1', '--preload-file', 'screenshot.not'])
 
   def test_sdl_canvas(self):
+    self.clear()
     self.btest('sdl_canvas.c', expected='1', args=['-s', 'LEGACY_GL_EMULATION=1'])
     # some extra coverage
-    self.btest('sdl_canvas.c', expected='1', args=['-s', 'LEGACY_GL_EMULATION=1', '-s', '-O0', 'SAFE_HEAP=1'])
-    self.btest('sdl_canvas.c', expected='1', args=['-s', 'LEGACY_GL_EMULATION=1', '-s', '-O2', 'SAFE_HEAP=1'])
+    self.clear()
+    self.btest('sdl_canvas.c', expected='1', args=['-s', 'LEGACY_GL_EMULATION=1', '-s', '-O0', '-s', 'SAFE_HEAP=1'])
+    self.clear()
+    self.btest('sdl_canvas.c', expected='1', args=['-s', 'LEGACY_GL_EMULATION=1', '-s', '-O2', '-s', 'SAFE_HEAP=1'])
 
   def test_sdl_canvas_proxy(self):
     def post():
@@ -749,7 +759,7 @@ window.close = function() {
     self.btest('sdl_canvas_proxy.c', reference='sdl_canvas_proxy.png', args=['--proxy-to-worker', '--preload-file', 'data.txt'], manual_reference=True, post_build=post)
 
   def test_sdl_canvas_alpha(self):
-    self.btest('sdl_canvas_alpha.c', reference='sdl_canvas_alpha.png', reference_slack=1)
+    self.btest('sdl_canvas_alpha.c', reference='sdl_canvas_alpha.png', reference_slack=9)
 
   def test_sdl_key(self):
     open(os.path.join(self.get_dir(), 'pre.js'), 'w').write('''
@@ -779,7 +789,7 @@ window.close = function() {
     ''')
     open(os.path.join(self.get_dir(), 'sdl_key.c'), 'w').write(self.with_report_result(open(path_from_root('tests', 'sdl_key.c')).read()))
 
-    Popen([PYTHON, EMCC, os.path.join(self.get_dir(), 'sdl_key.c'), '-o', 'page.html', '--pre-js', 'pre.js', '-s', '''EXPORTED_FUNCTIONS=['_main', '_one']''']).communicate()
+    Popen([PYTHON, EMCC, os.path.join(self.get_dir(), 'sdl_key.c'), '-o', 'page.html', '--pre-js', 'pre.js', '-s', '''EXPORTED_FUNCTIONS=['_main', '_one']''', '-s', 'NO_EXIT_RUNTIME=1']).communicate()
     self.run_browser('page.html', '', '/report_result?223092870')
 
   def test_sdl_key_proxy(self):
@@ -826,7 +836,7 @@ keydown(100);keyup(100); // trigger the end
 </body>''')
       open('test.html', 'w').write(html)
 
-    self.btest('sdl_key_proxy.c', '223092870', args=['--proxy-to-worker', '--pre-js', 'pre.js', '-s', '''EXPORTED_FUNCTIONS=['_main', '_one']'''], manual_reference=True, post_build=post)
+    self.btest('sdl_key_proxy.c', '223092870', args=['--proxy-to-worker', '--pre-js', 'pre.js', '-s', '''EXPORTED_FUNCTIONS=['_main', '_one']''', '-s', 'NO_EXIT_RUNTIME=1'], manual_reference=True, post_build=post)
 
   def test_sdl_text(self):
     open(os.path.join(self.get_dir(), 'pre.js'), 'w').write('''
@@ -1152,8 +1162,6 @@ keydown(100);keyup(100); // trigger the end
     self.run_browser('page.html', '', '/report_result?1')
 
   def test_sdl_audio_beeps(self):
-    if os.environ.get('EMCC_FAST_COMPILER') == '1': return self.skip('todo c++ exceptions in fastcomp')
-
     open(os.path.join(self.get_dir(), 'sdl_audio_beep.cpp'), 'w').write(self.with_report_result(open(path_from_root('tests', 'sdl_audio_beep.cpp')).read()))
 
     # use closure to check for a possible bug with closure minifying away newer Audio() attributes
@@ -1452,14 +1460,23 @@ keydown(100);keyup(100); // trigger the end
     self.btest('emscripten_api_browser.cpp', '1', args=['-s', '''EXPORTED_FUNCTIONS=['_main', '_third']'''])
 
   def test_emscripten_api2(self):
-    open('script1.js', 'w').write('''
-      Module._set(456);
-    ''')
+    def setup():
+      open('script1.js', 'w').write('''
+        Module._set(456);
+      ''')
+      open('file1.txt', 'w').write('first');
+      open('file2.txt', 'w').write('second');
 
-    open('file1.txt', 'w').write('first');
-    open('file2.txt', 'w').write('second');
+    setup()
     Popen([PYTHON, FILE_PACKAGER, 'test.data', '--preload', 'file1.txt', 'file2.txt'], stdout=open('script2.js', 'w')).communicate()
+    self.btest('emscripten_api_browser2.cpp', '1', args=['-s', '''EXPORTED_FUNCTIONS=['_main', '_set']'''])
 
+    # check using file packager to another dir
+    self.clear()
+    setup()
+    os.mkdir('sub')
+    Popen([PYTHON, FILE_PACKAGER, 'sub/test.data', '--preload', 'file1.txt', 'file2.txt'], stdout=open('script2.js', 'w')).communicate()
+    shutil.copyfile(os.path.join('sub', 'test.data'), 'test.data')
     self.btest('emscripten_api_browser2.cpp', '1', args=['-s', '''EXPORTED_FUNCTIONS=['_main', '_set']'''])
 
   def test_emscripten_api_infloop(self):
@@ -1536,6 +1553,21 @@ keydown(100);keyup(100); // trigger the end
 
   def test_cubegeom(self):
     self.btest('cubegeom.c', reference='cubegeom.png', args=['-O2', '-g', '-s', 'LEGACY_GL_EMULATION=1'])
+
+  def test_cubegeom_proc(self):
+    open('side.c', 'w').write(r'''
+
+extern void* SDL_GL_GetProcAddress(const char *);
+
+void *glBindBuffer = 0; // same name as the gl function, to check that the collision does not break us
+
+void *getBindBuffer() {
+  if (!glBindBuffer) glBindBuffer = SDL_GL_GetProcAddress("glBindBuffer");
+  return glBindBuffer;
+}
+''')
+    for opts in [0, 1]:
+      self.btest('cubegeom_proc.c', reference='cubegeom.png', args=['-O' + str(opts), 'side.c', '-s', 'LEGACY_GL_EMULATION=1'])
 
   def test_cubegeom_glew(self):
     self.btest('cubegeom_glew.c', reference='cubegeom.png', args=['-O2', '--closure', '1', '-s', 'LEGACY_GL_EMULATION=1'])
@@ -1815,3 +1847,36 @@ Module["preRun"].push(function () {
 
   def test_html5(self):
     self.btest(path_from_root('tests', 'test_html5.c'), expected='0')
+
+  def test_codemods(self):
+    for opt_level in [0, 2]:
+      print 'opt level', opt_level
+      opts = '-O' + str(opt_level)
+      # sanity checks, building with and without precise float semantics generates different results
+      self.btest(path_from_root('tests', 'codemods.cpp'), expected='2', args=[opts])
+      self.btest(path_from_root('tests', 'codemods.cpp'), expected='1', args=[opts, '-s', 'PRECISE_F32=1'])
+      self.btest(path_from_root('tests', 'codemods.cpp'), expected='1', args=[opts, '-s', 'PRECISE_F32=2']) # empty polyfill, but browser has support, so semantics are like float
+
+      # now use a shell to remove the browser's fround support
+      open(self.in_dir('shell.html'), 'w').write(open(path_from_root('src', 'shell.html')).read().replace('var Module = {', '''
+  Math.fround = null;
+  var Module = {
+  '''))
+      self.btest(path_from_root('tests', 'codemods.cpp'), expected='2', args=[opts, '--shell-file', 'shell.html'])
+      self.btest(path_from_root('tests', 'codemods.cpp'), expected='1', args=[opts, '--shell-file', 'shell.html', '-s', 'PRECISE_F32=1'])
+      self.btest(path_from_root('tests', 'codemods.cpp'), expected='2', args=[opts, '--shell-file', 'shell.html', '-s', 'PRECISE_F32=2']) # empty polyfill, no browser support, so semantics are like double
+
+      # finally, remove fround, patch up fround as the code executes (after polyfilling etc.), to verify that we got rid of it entirely on the client side
+      fixer = 'python fix.py'
+      open('fix.py', 'w').write(r'''
+import sys
+filename = sys.argv[1]
+js = open(filename).read()
+replaced = js.replace("var Math_fround = Math.fround;", "var Math_fround = Math.fround = function(x) { return 0; }")
+assert js != replaced
+open(filename, 'w').write(replaced)
+  ''')
+      self.btest(path_from_root('tests', 'codemods.cpp'), expected='2', args=[opts, '--shell-file', 'shell.html', '--js-transform', fixer]) # no fround anyhow
+      self.btest(path_from_root('tests', 'codemods.cpp'), expected='121378', args=[opts, '--shell-file', 'shell.html', '--js-transform', fixer, '-s', 'PRECISE_F32=1']) # proper polyfill was enstated, then it was replaced by the fix so 0 is returned all the time, hence a different result here
+      self.btest(path_from_root('tests', 'codemods.cpp'), expected='2', args=[opts, '--shell-file', 'shell.html', '--js-transform', fixer, '-s', 'PRECISE_F32=2']) # we should remove the calls to the polyfill ENTIRELY here, on the clientside, so we should NOT see any calls to fround here, and result should be like double
+

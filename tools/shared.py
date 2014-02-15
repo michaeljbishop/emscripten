@@ -345,7 +345,7 @@ def find_temp_directory():
 # we re-check sanity when the settings are changed)
 # We also re-check sanity and clear the cache when the version changes
 
-EMSCRIPTEN_VERSION = '1.10.1'
+EMSCRIPTEN_VERSION = '1.11.0'
 
 def generate_sanity():
   return EMSCRIPTEN_VERSION + '|' + get_llvm_target() + '|' + LLVM_ROOT + '|' + get_clang_version()
@@ -1167,7 +1167,7 @@ class Building:
     #opts += ['-debug-pass=Arguments']
     if get_clang_version() == '3.4' and not Settings.SIMD:
       opts += ['-disable-loop-vectorization', '-disable-slp-vectorization'] # llvm 3.4 has these on by default
-    logging.debug('emcc: LLVM opts: ' + str(opts))
+    logging.debug('emcc: LLVM opts: ' + ' '.join(opts))
     target = out or (filename + '.opt.bc')
     output = Popen([LLVM_OPT, filename] + opts + ['-o', target], stdout=PIPE).communicate()[0]
     assert os.path.exists(target), 'Failed to run llvm optimizations: ' + output

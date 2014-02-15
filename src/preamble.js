@@ -188,6 +188,8 @@ function SAFE_HEAP_STORE(dest, value, bytes, isFloat) {
 #endif
   assert(dest > 0, 'segmentation fault');
   assert(dest % bytes === 0);
+  assert(dest < Math.max(DYNAMICTOP, STATICTOP));
+  assert(DYNAMICTOP <= TOTAL_MEMORY);
   setValue(dest, value, getSafeHeapType(bytes, isFloat), 1);
 }
 
@@ -197,6 +199,8 @@ function SAFE_HEAP_LOAD(dest, bytes, isFloat, unsigned) {
 #endif
   assert(dest > 0, 'segmentation fault');
   assert(dest % bytes === 0);
+  assert(dest < Math.max(DYNAMICTOP, STATICTOP));
+  assert(DYNAMICTOP <= TOTAL_MEMORY);
   var type = getSafeHeapType(bytes, isFloat);
   var ret = getValue(dest, type, 1);
   if (unsigned) ret = unSign(ret, parseInt(type.substr(1)), 1);
@@ -1023,6 +1027,11 @@ function preMain() {
 }
 
 function exitRuntime() {
+#if ASSERTIONS
+  if (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) {
+    Module.printErr('Exiting runtime. Any attempt to access the compiled C code may fail from now. If you want to keep the runtime alive, set Module["noExitRuntime"] = true or build with -s NO_EXIT_RUNTIME=1');
+  }
+#endif
   callRuntimeCallbacks(__ATEXIT__);
 }
 

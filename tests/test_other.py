@@ -1780,7 +1780,7 @@ f.close()
       (path_from_root('tools', 'test-js-optimizer-asm-pre.js'), open(path_from_root('tools', 'test-js-optimizer-asm-pre-output.js')).read(),
        ['asm', 'simplifyExpressions']),
       (path_from_root('tools', 'test-js-optimizer-asm-pre-f32.js'), open(path_from_root('tools', 'test-js-optimizer-asm-pre-output-f32.js')).read(),
-       ['asm', 'asmPreciseF32', 'simplifyExpressions']),
+       ['asm', 'asmPreciseF32', 'simplifyExpressions', 'optimizeFrounds']),
       (path_from_root('tools', 'test-js-optimizer-asm-last.js'), open(path_from_root('tools', 'test-js-optimizer-asm-last-output.js')).read(),
        ['asm', 'last']),
       (path_from_root('tools', 'test-js-optimizer-asm-relocate.js'), open(path_from_root('tools', 'test-js-optimizer-asm-relocate-output.js')).read(),
@@ -1808,6 +1808,7 @@ f.close()
       assert 'error' not in err, 'Unexpected stderr: ' + err
 
   def test_chunking(self):
+    if os.environ.get('EMCC_FAST_COMPILER') == '1': return self.skip('not relevant for fastcomp, only checks js compiler chunking')
     if os.environ.get('EMCC_DEBUG'): return self.skip('cannot run in debug mode')
     if os.environ.get('EMCC_CORES'): return self.skip('cannot run if cores are altered')
     if multiprocessing.cpu_count() < 2: return self.skip('need multiple cores')

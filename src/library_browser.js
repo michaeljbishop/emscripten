@@ -13,6 +13,7 @@ mergeInto(LibraryManager.library, {
   $Browser: {
     mainLoop: {
       scheduler: null,
+      method: '',
       shouldPause: false,
       paused: false,
       queue: [],
@@ -445,6 +446,10 @@ mergeInto(LibraryManager.library, {
              0;
     },
 
+    getMouseWheelDelta: function(event) {
+      return Math.max(-1, Math.min(1, event.type === 'DOMMouseScroll' ? event.detail : -event.wheelDelta));
+    },
+
     mouseX: 0,
     mouseY: 0,
     mouseMovementX: 0,
@@ -686,6 +691,8 @@ mergeInto(LibraryManager.library, {
   },
 
   emscripten_async_prepare: function(file, onload, onerror) {
+    Module['noExitRuntime'] = true;
+
     var _file = Pointer_stringify(file);
     var data = FS.analyzePath(_file);
     if (!data.exists) return -1;
@@ -705,6 +712,8 @@ mergeInto(LibraryManager.library, {
   },
 
   emscripten_async_prepare_data: function(data, size, suffix, arg, onload, onerror) {
+    Module['noExitRuntime'] = true;
+
     var _suffix = Pointer_stringify(suffix);
     if (!Browser.asyncPrepareDataCounter) Browser.asyncPrepareDataCounter = 0;
     var name = 'prepare_data_' + (Browser.asyncPrepareDataCounter++) + '.' + _suffix;
@@ -796,6 +805,11 @@ mergeInto(LibraryManager.library, {
       GL.newRenderingFrameStarted();
 #endif
 
+      if (Browser.mainLoop.method === 'timeout' && Module.ctx) {
+        Module.printErr('Looks like you are rendering without using requestAnimationFrame for the main loop. You should use 0 for the frame rate in emscripten_set_main_loop in order to use requestAnimationFrame, as that can greatly improve your frame rates!');
+        Browser.mainLoop.method = ''; // just warn once per call to set main loop
+      }
+
       if (Module['preMainLoop']) {
         Module['preMainLoop']();
       }
@@ -826,11 +840,13 @@ mergeInto(LibraryManager.library, {
     if (fps && fps > 0) {
       Browser.mainLoop.scheduler = function Browser_mainLoop_scheduler() {
         setTimeout(Browser.mainLoop.runner, 1000/fps); // doing this each time means that on exception, we stop
-      }
+      };
+      Browser.mainLoop.method = 'timeout';
     } else {
       Browser.mainLoop.scheduler = function Browser_mainLoop_scheduler() {
         Browser.requestAnimationFrame(Browser.mainLoop.runner);
-      }
+      };
+      Browser.mainLoop.method = 'rAF';
     }
     Browser.mainLoop.scheduler();
 
@@ -958,6 +974,8 @@ mergeInto(LibraryManager.library, {
   },
 
   emscripten_call_worker: function(id, funcName, data, size, callback, arg) {
+    Module['noExitRuntime'] = true; // should we only do this if there is a callback?
+
     funcName = Pointer_stringify(funcName);
     var info = Browser.workers[id];
     var callbackId = -1;
