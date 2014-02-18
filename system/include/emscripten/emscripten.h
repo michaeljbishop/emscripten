@@ -241,7 +241,7 @@ void emscripten_get_canvas_size(int *width, int *height, int *isFullscreen);
 double emscripten_get_now();
 #else
 #include <time.h>
-double emscripten_get_now() {
+inline double emscripten_get_now() {
   return (1000*clock())/(double)CLOCKS_PER_SEC;
 }
 #endif
